@@ -1,6 +1,5 @@
-"""PSD layer decomposition application."""
+"""PSD 레이어 분리 저장 애플리케이션 패키지입니다."""
 
 __all__ = ["__version__"]
 
 __version__ = "0.1.0"
-

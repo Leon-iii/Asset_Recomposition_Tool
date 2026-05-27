@@ -16,10 +16,16 @@ ProgressCallback = Callable[[str], None]
 
 
 class Exporter:
+    """ExportJob을 실제 PNG 또는 PSD 파일로 변환하는 내보내기 서비스입니다."""
+
     def __init__(self, progress: ProgressCallback | None = None) -> None:
+        """GUI가 넘긴 진행 콜백이 없으면 조용히 동작하도록 기본 콜백을 사용합니다."""
+
         self.progress = progress or (lambda _message: None)
 
     def export(self, job: ExportJob) -> list[Path]:
+        """선택된 레이어를 요청 형식에 맞게 내보내고 생성된 파일 경로를 반환합니다."""
+
         if not job.selected_layer_ids:
             raise PsdBackendError("내보낼 레이어를 하나 이상 선택하세요.")
 
@@ -34,6 +40,8 @@ class Exporter:
         raise PsdBackendError(f"지원하지 않는 출력 형식입니다: {job.export_format}")
 
     def _export_png(self, document: PsdDocument, job: ExportJob, output_directory: Path) -> list[Path]:
+        """psd-tools가 렌더링한 레이어 이미지를 PNG 파일로 저장합니다."""
+
         outputs: list[Path] = []
         scale = job.rescale / 100
         reserved_paths: set[Path] = set()
@@ -43,6 +51,7 @@ class Exporter:
             self.progress(f"PNG 렌더링 중: {layer.display_name}")
             image = self._prepare_png_image(document, layer_id, job.preserve_canvas)
             if scale != 1:
+                # 확대 옵션은 캔버스 보존 또는 crop 이후의 최종 이미지 크기에 적용합니다.
                 width = max(1, round(image.width * scale))
                 height = max(1, round(image.height * scale))
                 image = image.resize((width, height), Image.Resampling.LANCZOS)
@@ -62,6 +71,8 @@ class Exporter:
 
     @staticmethod
     def _prepare_png_image(document: PsdDocument, layer_id: str, preserve_canvas: bool) -> Image.Image:
+        """레이어를 원본 캔버스에 얹거나, 레이어 자체 크기로 crop한 이미지를 준비합니다."""
+
         layer = document.get_layer_info(layer_id)
         image = document.render_layer(layer_id).convert("RGBA")
         if not preserve_canvas:
@@ -70,6 +81,7 @@ class Exporter:
             return image
 
         canvas = Image.new("RGBA", (document.width, document.height), (0, 0, 0, 0))
+        # PSD 레이어가 캔버스 밖으로 나간 경우에도 Pillow crop/composite 범위를 안전하게 맞춥니다.
         source_left = max(0, -layer.left)
         source_top = max(0, -layer.top)
         dest_left = max(0, layer.left)
@@ -82,6 +94,8 @@ class Exporter:
         return canvas
 
     def _export_psd(self, document: PsdDocument, job: ExportJob, output_directory: Path) -> list[Path]:
+        """Photoshop COM 자동화로 원본 PSD를 복제한 뒤 선택 레이어만 남겨 저장합니다."""
+
         try:
             import win32com.client
         except ImportError as exc:
@@ -104,6 +118,7 @@ class Exporter:
                 job.overwrite_existing,
                 reserved_paths,
             )
+            # Photoshop 작업 전에 원본을 복사해 두어 원본 PSD는 절대 수정하지 않습니다.
             shutil.copy2(job.source_path, output_path)
             self.progress(f"PSD 준비 중: {layer.display_name}")
             self._keep_only_layer_in_photoshop(app, output_path, layer.display_name, job.rescale, job.preserve_canvas)
@@ -115,10 +130,13 @@ class Exporter:
     def _keep_only_layer_in_photoshop(
         app, path: Path, layer_display_name: str, rescale: int, preserve_canvas: bool
     ) -> None:
+        """Photoshop JavaScript를 실행해 대상 레이어 외의 레이어를 제거하고 저장합니다."""
+
         doc = app.Open(str(path))
         try:
             target_path_json = json.dumps(layer_display_name)
             scale = rescale / 100
+            # ExtendScript는 그룹을 재귀 순회하며 경로가 일치하지 않는 ArtLayer를 제거합니다.
             script = f"""
 var targetPath = {target_path_json};
 var targetParts = targetPath.split(" / ");

@@ -21,6 +21,8 @@ LAYER_TABLE_RIGHT_PADDING = 8
 
 
 def resource_path(relative_path: str) -> Path:
+    """개발 실행과 PyInstaller 빌드 실행 모두에서 리소스 파일을 찾습니다."""
+
     for base_path in resource_base_paths():
         candidate = base_path / relative_path
         if candidate.exists():
@@ -29,6 +31,8 @@ def resource_path(relative_path: str) -> Path:
 
 
 def resource_base_paths() -> list[Path]:
+    """아이콘 같은 번들 리소스를 찾기 위한 후보 루트 경로 목록을 반환합니다."""
+
     paths: list[Path] = []
     if hasattr(sys, "_MEIPASS"):
         paths.append(Path(sys._MEIPASS))
@@ -42,12 +46,17 @@ def resource_base_paths() -> list[Path]:
 try:
     from tkinterdnd2 import DND_FILES, TkinterDnD
 except ImportError:
+    # 드래그 앤 드롭은 선택 기능이므로, 모듈이 없을 때도 파일 찾기 버튼으로 동작하게 둡니다.
     DND_FILES = None
     TkinterDnD = None
 
 
 class PsdDecomposerApp:
+    """PSD 파일 입력, 레이어 선택, 출력 옵션, 내보내기 실행을 담당하는 Tkinter 앱입니다."""
+
     def __init__(self, root: tk.Tk) -> None:
+        """애플리케이션 상태 변수를 준비하고 전체 GUI를 구성합니다."""
+
         self.root = root
         self.root.title("PSD Decomposition Tool v1.0")
         self._set_window_icon()
@@ -85,11 +94,15 @@ class PsdDecomposerApp:
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
 
     def _set_window_icon(self) -> None:
+        """실행 환경에 맞는 assets/app.ico를 찾아 Tkinter 창 아이콘으로 설정합니다."""
+
         icon_path = resource_path("assets/app.ico")
         if icon_path.exists():
             self.root.iconbitmap(str(icon_path))
 
     def _build_ui(self) -> None:
+        """파일 입력, 경로, 레이어 테이블, 출력 설정, 상태 표시 영역을 배치합니다."""
+
         self.style = ttk.Style(self.root)
         self.style.configure("Status.Horizontal.TProgressbar", thickness=15)
         self.root.columnconfigure(0, weight=1)
@@ -116,6 +129,7 @@ class PsdDecomposerApp:
         )
         self.drop_placeholder.grid(row=0, column=0, rowspan=2, columnspan=2, sticky="nsew")
 
+        # 파일 경로 영역은 입력 파일과 출력 폴더를 한곳에서 확인하고 수정할 수 있게 분리합니다.
         path_frame = ttk.LabelFrame(self.root, text="파일 경로", padding=12)
         path_frame.grid(row=1, column=0, sticky="ew", padx=12, pady=(0, 8))
         path_frame.columnconfigure(1, weight=1)
@@ -160,6 +174,7 @@ class PsdDecomposerApp:
         canvas.grid(row=1, column=0, sticky="nsew")
         scrollbar.grid(row=1, column=1, sticky="ns")
 
+        # 출력 설정 영역은 내보내기 버튼이 항상 하단에 머물도록 row weight를 둡니다.
         settings_frame = ttk.LabelFrame(body, text="출력 설정", padding=12)
         settings_frame.grid(row=0, column=1, sticky="nsew", padx=(6, 0))
         settings_frame.columnconfigure(1, weight=1)
@@ -249,6 +264,8 @@ class PsdDecomposerApp:
         )
 
     def _bind_drag_and_drop(self) -> None:
+        """드롭 존과 내부 라벨에 동일한 파일 드롭 이벤트를 연결합니다."""
+
         if TkinterDnD is None or DND_FILES is None:
             self.drop_detail_label.configure(text="드래그 앤 드롭을 사용하려면 tkinterdnd2가 필요합니다.")
             return
@@ -257,6 +274,8 @@ class PsdDecomposerApp:
             widget.dnd_bind("<<Drop>>", self._handle_drop)
 
     def _detect_psd_export_status(self) -> tuple[bool, str]:
+        """PSD 저장에 필요한 pywin32와 Photoshop COM 등록 상태를 확인합니다."""
+
         try:
             import win32com.client  # noqa: F401
         except ImportError:
@@ -271,27 +290,38 @@ class PsdDecomposerApp:
             return False, "Photoshop COM 등록을 찾을 수 없습니다. Photoshop 설치 상태를 확인하세요."
 
     def _show_psd_unavailable_warning(self, _event=None) -> str:
+        """비활성화된 PSD 라디오 버튼을 눌렀을 때 사유를 알려줍니다."""
+
         messagebox.showwarning("PSD 저장 불가", self.psd_export_message)
         return "break"
 
     def _browse_file(self) -> None:
+        """파일 선택 대화상자에서 PSD를 선택해 로드합니다."""
+
         filetypes = [("PSD 파일", "*.psd"), ("모든 파일", "*.*")]
         selected = filedialog.askopenfilename(title="PSD 열기", filetypes=filetypes)
         if selected:
             self._load_file(Path(selected))
 
     def _browse_output_dir(self) -> None:
+        """출력 폴더 선택 대화상자를 열고 선택값을 반영합니다."""
+
         selected = filedialog.askdirectory(title="출력 폴더 선택")
         if selected:
             self.output_dir_var.set(selected)
 
     def _handle_drop(self, event) -> None:
+        """드롭된 파일 목록 중 첫 번째 파일을 PSD 입력으로 처리합니다."""
+
         paths = self.root.tk.splitlist(event.data)
         if paths:
             self._load_file(Path(paths[0]))
 
     def _load_file(self, path: Path) -> None:
+        """PSD 파일을 열고 미리보기, 출력 폴더, 레이어 테이블을 갱신합니다."""
+
         if path.suffix.lower() not in SUPPORTED_EXTENSIONS:
+            # 잘못된 확장자는 기존에 로드된 파일 상태를 유지한 채 경고만 표시합니다.
             messagebox.showwarning("지원하지 않는 파일", "현재는 PSD 파일만 지원합니다.")
             return
         self._show_file_processing_message()
@@ -304,6 +334,7 @@ class PsdDecomposerApp:
 
         self.source_path = path
         self.source_var.set(str(path))
+        # 새 파일을 열면 출력 폴더도 해당 PSD가 있는 폴더로 자동 동기화합니다.
         self.output_dir_var.set(str(path.parent))
         self._update_drop_zone(path, preview_image)
         self._populate_layers(self.document.layers)
@@ -312,6 +343,8 @@ class PsdDecomposerApp:
         self.status_var.set(f"{path.name}에서 레이어 {len(self.document.layers)}개를 불러왔습니다.")
 
     def _show_file_processing_message(self) -> None:
+        """PSD 로드가 시작되었음을 드롭 존과 하단 상태 영역에 즉시 표시합니다."""
+
         self.drop_image_label.grid_remove()
         self.drop_title_label.grid_remove()
         self.drop_detail_label.grid_remove()
@@ -323,6 +356,8 @@ class PsdDecomposerApp:
         self.root.update_idletasks()
 
     def _update_drop_zone(self, path: Path, preview_image: Image.Image) -> None:
+        """드롭 존을 안내 문구에서 파일 썸네일과 파일 정보 표시로 전환합니다."""
+
         self.drop_placeholder.grid_remove()
         self.drop_zone.rowconfigure(0, weight=1)
         self.drop_zone.rowconfigure(1, weight=1)
@@ -337,6 +372,8 @@ class PsdDecomposerApp:
         self.drop_detail_label.configure(text=f"캔버스 크기: {preview_image.width}x{preview_image.height} px")
 
     def _drop_zone_thumbnail_size(self) -> tuple[int, int]:
+        """현재 드롭 존 높이에 맞춰 원본 파일 썸네일의 최대 크기를 계산합니다."""
+
         self.drop_zone.update_idletasks()
         height = self.drop_zone.winfo_height()
         if height <= 1:
@@ -346,6 +383,8 @@ class PsdDecomposerApp:
         return max_width, max_height
 
     def _populate_layers(self, layers: tuple[LayerInfo, ...]) -> None:
+        """레이어 메타데이터로 선택 체크박스, 썸네일, 이름 테이블을 다시 만듭니다."""
+
         for child in self.layer_list.winfo_children():
             child.destroy()
         self.select_all_check = None
@@ -379,6 +418,7 @@ class PsdDecomposerApp:
 
             photo = self._create_layer_photo(layer.id)
             self.layer_photos.append(photo)
+            # 모든 행을 같은 최소 높이로 고정해 체크박스와 썸네일이 흔들리지 않게 합니다.
             self.layer_list.rowconfigure(row, minsize=56)
             ttk.Checkbutton(
                 self.layer_list,
@@ -391,6 +431,8 @@ class PsdDecomposerApp:
         self._update_layer_selection_state()
 
     def _create_layer_photo(self, layer_id: str) -> ImageTk.PhotoImage:
+        """레이어 썸네일을 만들고, 실패 시 투명 이미지로 테이블 레이아웃을 유지합니다."""
+
         assert self.document is not None
         try:
             thumbnail = self.document.render_layer_thumbnail(layer_id)
@@ -399,6 +441,8 @@ class PsdDecomposerApp:
         return ImageTk.PhotoImage(thumbnail)
 
     def _set_all_layers(self, selected: bool) -> None:
+        """전체 선택 체크박스에서 개별 레이어 체크 상태를 일괄 변경합니다."""
+
         self.is_updating_layer_selection = True
         for var in self.layer_vars.values():
             var.set(selected)
@@ -406,6 +450,8 @@ class PsdDecomposerApp:
         self._update_layer_selection_state()
 
     def _toggle_select_all(self) -> None:
+        """전체 선택 체크박스의 true/false/alternate 상태를 개별 체크박스에 전파합니다."""
+
         if self.is_updating_layer_selection:
             return
         if "alternate" in self.select_all_check.state():
@@ -416,10 +462,14 @@ class PsdDecomposerApp:
             self._set_all_layers(False)
 
     def _on_layer_selection_changed(self) -> None:
+        """개별 레이어 선택 변경을 전체 선택 상태와 내보내기 버튼 상태에 반영합니다."""
+
         if not self.is_updating_layer_selection:
             self._update_layer_selection_state()
 
     def _update_layer_selection_state(self) -> None:
+        """선택 개수를 기준으로 전체 선택의 alternate 상태와 버튼 활성화를 계산합니다."""
+
         selected_count = sum(1 for var in self.layer_vars.values() if var.get())
         total_count = len(self.layer_vars)
         control_state = "normal" if total_count > 0 else "disabled"
@@ -428,6 +478,7 @@ class PsdDecomposerApp:
         if self.select_all_check is not None:
             self.select_all_check.configure(state=control_state)
             if total_count > 0 and 0 < selected_count < total_count:
+                # 일부만 선택된 상태는 ttk의 alternate state로 표현합니다.
                 self.select_all_var.set(False)
                 self.select_all_check.state(["alternate"])
             else:
@@ -438,15 +489,23 @@ class PsdDecomposerApp:
         self.export_button.configure(state="normal" if selected_count > 0 else "disabled")
 
     def _current_selected_layer_ids(self) -> tuple[str, ...]:
+        """현재 체크된 레이어 id만 내보내기 순서대로 반환합니다."""
+
         return tuple(layer_id for layer_id, var in self.layer_vars.items() if var.get())
 
     def _show_progress_bar(self) -> None:
+        """파일 로드나 내보내기 작업 중에만 진행 막대를 상태 문구 오른쪽에 표시합니다."""
+
         self.progress_bar.grid(row=0, column=1, sticky="e", padx=(12, 0))
 
     def _hide_progress_bar(self) -> None:
+        """진행 막대를 숨겨 작업이 끝난 상태를 명확히 합니다."""
+
         self.progress_bar.grid_remove()
 
     def _create_export_job(self, selected_layer_ids: tuple[str, ...]) -> ExportJob:
+        """현재 GUI 상태를 Exporter가 사용할 불변 작업 데이터로 변환합니다."""
+
         if self.source_path is None:
             raise PsdBackendError("PSD 파일을 먼저 선택하세요.")
         return ExportJob(
@@ -464,6 +523,8 @@ class PsdDecomposerApp:
         )
 
     def _start_export(self) -> None:
+        """내보내기 설정을 저장하고 백그라운드 스레드에서 Exporter를 실행합니다."""
+
         if self.source_path is None:
             messagebox.showwarning("파일 없음", "PSD 파일을 먼저 선택하세요.")
             return
@@ -477,12 +538,15 @@ class PsdDecomposerApp:
         self.root.after(100, self._poll_worker_queue)
 
     def _run_export(self, job: ExportJob) -> None:
+        """GUI가 멈추지 않도록 실제 내보내기를 워커 스레드에서 수행합니다."""
+
         progress_count = 0
         total_count = max(1, len(job.selected_layer_ids))
 
         def progress(message: str) -> None:
             nonlocal progress_count
             progress_count += 1
+            # Tkinter 위젯은 메인 스레드에서만 갱신해야 하므로 queue로 메시지만 전달합니다.
             self.worker_queue.put(("progress", (progress_count, total_count, message)))
 
         try:
@@ -493,6 +557,8 @@ class PsdDecomposerApp:
             self.worker_queue.put(("done", outputs))
 
     def _poll_worker_queue(self) -> None:
+        """워커 스레드가 보낸 진행/완료/오류 메시지를 Tkinter 메인 루프에서 처리합니다."""
+
         try:
             kind, payload = self.worker_queue.get_nowait()
         except queue.Empty:
@@ -517,6 +583,8 @@ class PsdDecomposerApp:
             self._hide_progress_bar()
 
     def _save_settings(self) -> None:
+        """현재 GUI 옵션을 다음 실행 때 복원할 수 있도록 설정 파일에 저장합니다."""
+
         self.settings.output_directory = self.output_dir_var.get().strip()
         self.settings.wrap_with_folder = self.wrap_var.get()
         self.settings.include_original_name = self.name_original_var.get()
@@ -529,11 +597,15 @@ class PsdDecomposerApp:
         self.settings.save()
 
     def _on_close(self) -> None:
+        """창을 닫기 전에 사용자 설정을 저장합니다."""
+
         self._save_settings()
         self.root.destroy()
 
 
 def main() -> None:
+    """드래그 앤 드롭 지원 여부에 맞는 루트 윈도우를 만들고 앱을 시작합니다."""
+
     root_class = TkinterDnD.Tk if TkinterDnD is not None else tk.Tk
     root = root_class()
     PsdDecomposerApp(root)
@@ -541,7 +613,11 @@ def main() -> None:
 
 
 class Tooltip:
+    """라벨에 마우스를 올렸을 때 짧은 안내 문구를 띄우는 헬퍼입니다."""
+
     def __init__(self, widget: tk.Widget, text: str) -> None:
+        """대상 위젯에 hover 이벤트를 연결합니다."""
+
         self.widget = widget
         self.text = text
         self.window: tk.Toplevel | None = None
@@ -549,6 +625,8 @@ class Tooltip:
         widget.bind("<Leave>", self._hide)
 
     def _show(self, _event=None) -> None:
+        """위젯 아래쪽에 border가 있는 작은 툴팁 창을 생성합니다."""
+
         if self.window is not None:
             return
         x = self.widget.winfo_rootx() + 16
@@ -567,6 +645,8 @@ class Tooltip:
         label.pack()
 
     def _hide(self, _event=None) -> None:
+        """마우스가 벗어나면 툴팁 창을 제거합니다."""
+
         if self.window is not None:
             self.window.destroy()
             self.window = None

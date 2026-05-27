@@ -1,0 +1,1214 @@
+.ase / .aseprite 바이너리 파서 및 중간계층 통합 확장 계획서
+대상 프로젝트: psd_decomposer
+작성 목적: Codex에게 전달할 구현 지시서
+
+
+0. 핵심 결론
+
+현재 psd_decomposer의 구조에서는 Aseprite 디코더를 GUI 계층이나 Exporter 계층에 직접 넣지 말고, 기존 PsdDocument와 같은 위치의 "파일 백엔드 계층"에 삽입하는 것이 가장 적절하다.
+
+즉, 현재 구조가 대략 다음과 같다면:
+
+- GUI 계층: psd_decomposer.gui.PsdDecomposerApp
+- PSD 백엔드 계층: psd_decomposer.psd_backend.PsdDocument
+- 데이터 모델 계층: psd_decomposer.models.LayerInfo, ExportJob
+- 처리/내보내기 계층: psd_decomposer.exporter.Exporter
+
+Aseprite 지원은 다음처럼 추가한다.
+
+- 공통 문서 백엔드 계층 신설 또는 확장
+  - psd_decomposer.document_backend 또는 psd_decomposer.backends
+- PSD 전용 백엔드
+  - psd_decomposer.psd_backend.PsdDocument
+- ASE 전용 백엔드
+  - psd_decomposer.ase_backend.AsepriteDocument
+- ASE 바이너리 코덱 하위 모듈
+  - psd_decomposer.aseprite_codec
+
+권장 방향은 다음과 같다.
+
+1. .ase/.aseprite 바이너리 파싱은 psd_decomposer.aseprite_codec에 격리한다.
+2. GUI와 Exporter는 가능하면 PSD인지 ASE인지 직접 알지 않도록 한다.
+3. PsdDocument와 AsepriteDocument가 같은 문서 인터페이스를 제공하게 한다.
+4. LayerInfo는 가능한 한 재사용하되, frame/tag/cel이 필요한 정보는 별도 모델을 추가한다.
+5. ExportJob에는 source_format 또는 document_type을 추가할 수 있다.
+6. Exporter는 PsdDocument를 직접 생성하지 말고 DocumentLoader/DocumentFactory를 통해 소스 파일에 맞는 문서를 연다.
+
+
+1. 현재 아키텍처 요약
+
+현재 프로그램은 specs.md 기준으로 다음 네 계층으로 나뉜다.
+
+1. 파일 입력 계층
+2. 레이어 선택 계층
+3. 출력 설정 계층
+4. 처리 계층
+
+현재 구현상 주요 매핑은 다음과 같다.
+
+1. 파일 입력 계층
+   - psd_decomposer.gui
+   - psd_decomposer.psd_backend
+   - PsdDecomposerApp
+   - PsdDocument
+   - validate_input_path
+
+2. 레이어 선택 계층
+   - psd_decomposer.gui
+   - psd_decomposer.models
+   - psd_decomposer.psd_backend
+   - LayerInfo
+   - PsdDocument._collect_layers
+   - PsdDecomposerApp._populate_layers
+
+3. 출력 설정 계층
+   - psd_decomposer.gui
+   - psd_decomposer.config
+   - psd_decomposer.models
+   - AppSettings
+   - ExportJob
+   - PsdDecomposerApp._create_export_job
+
+4. 처리 계층
+   - psd_decomposer.exporter
+   - psd_decomposer.naming
+   - psd_decomposer.psd_backend
+   - Exporter
+   - build_base_name
+   - resolve_output_path
+   - PsdDocument.render_layer
+
+현재 흐름의 핵심 특징:
+
+- GUI의 _load_file에서 PsdDocument(path)를 생성한다.
+- PsdDocument가 PSD 파일을 열고 레이어 목록, 미리보기, 썸네일 렌더링을 담당한다.
+- GUI는 PsdDocument.layers에서 받은 LayerInfo 목록으로 레이어 선택 UI를 만든다.
+- 내보내기 시 ExportJob을 만들고, Exporter가 워커 스레드에서 다시 PsdDocument(job.source_path)를 생성한다.
+- 즉 GUI 미리보기용 문서와 Exporter 저장용 문서가 분리되어 있다.
+
+Aseprite 지원은 이 흐름을 유지하면서 PSD 전용 의존성을 제거하는 방식으로 넣는 것이 좋다.
+
+
+2. 삽입 위치 판단
+
+Aseprite 디코더를 넣을 수 있는 후보는 크게 네 곳이다.
+
+1. GUI 계층에 삽입
+2. Exporter 계층에 삽입
+3. 기존 psd_backend에 삽입
+4. 별도 ase_backend + aseprite_codec 계층으로 삽입
+
+판단:
+
+- GUI 계층에 넣는 것은 비추천이다.
+  GUI는 사용자 입력, 상태 표시, 레이어 테이블 표시만 담당해야 한다.
+  바이너리 파싱이 GUI에 들어가면 테스트와 유지보수가 어려워진다.
+
+- Exporter 계층에 넣는 것도 비추천이다.
+  Exporter는 이미 처리 계층이며, 실제 저장 작업과 progress callback을 담당한다.
+  파일 파싱 책임까지 들어가면 처리 계층이 비대해진다.
+
+- 기존 psd_backend에 넣는 것도 비추천이다.
+  이름 자체가 PSD 전용이므로 Aseprite 포맷을 넣으면 모듈 의미가 깨진다.
+  장기적으로 PNG, ASE, PSD, 기타 포맷으로 확장할 때 혼란이 커진다.
+
+- 별도 ase_backend + aseprite_codec 계층으로 삽입하는 것을 추천한다.
+  aseprite_codec은 순수 바이너리 파싱/모델 변환만 담당한다.
+  ase_backend.AsepriteDocument는 현재 PsdDocument와 같은 역할을 한다.
+  GUI와 Exporter는 공통 Document 인터페이스만 사용하도록 점진적으로 변경한다.
+
+
+3. 권장 전체 구조
+
+권장 디렉터리 구조:
+
+src/
+└─ psd_decomposer/
+   ├─ gui.py
+   ├─ exporter.py
+   ├─ models.py
+   ├─ config.py
+   ├─ naming.py
+   ├─ psd_backend.py
+   ├─ ase_backend.py                  새 파일
+   ├─ document_backend.py             새 파일, 공통 인터페이스/팩토리
+   └─ aseprite_codec/                 새 패키지
+      ├─ __init__.py
+      ├─ binary.py
+      ├─ constants.py
+      ├─ model.py
+      ├─ decoder.py
+      ├─ chunks.py
+      ├─ pixels.py
+      └─ errors.py
+
+대안 구조:
+
+src/
+└─ psd_decomposer/
+   ├─ backends/
+   │  ├─ __init__.py
+   │  ├─ base.py
+   │  ├─ loader.py
+   │  ├─ psd.py
+   │  └─ aseprite.py
+   └─ aseprite_codec/
+      └─ ...
+
+현재 프로젝트가 이미 psd_backend.py를 쓰고 있으므로, 변경량을 줄이려면 1차 구현에서는 다음 방식을 권장한다.
+
+- psd_backend.py는 그대로 둔다.
+- ase_backend.py를 새로 만든다.
+- document_backend.py를 새로 만들어 공통 로더와 인터페이스를 둔다.
+- 나중에 리팩터링 여유가 생기면 backends/ 패키지로 옮긴다.
+
+
+4. 계층별 책임 재정의
+
+4.1 GUI 계층
+
+대표 클래스:
+
+- PsdDecomposerApp
+
+기존 책임:
+
+- 사용자 입력 받기
+- 파일/출력 옵션 상태 보관
+- 레이어 테이블 표시
+- progress bar와 상태 메시지 표시
+- Exporter를 백그라운드 스레드로 실행
+
+Aseprite 추가 후 책임:
+
+- .psd, .ase, .aseprite 확장자를 입력으로 허용한다.
+- 파일 로드는 PsdDocument 직접 생성이 아니라 load_document(path) 또는 DocumentLoader.open(path)를 호출한다.
+- GUI는 문서가 PSD인지 ASE인지 몰라도 layers, render_preview, render_layer_thumbnail을 사용할 수 있어야 한다.
+- Aseprite 파일이 로드된 경우 frame/tag 관련 UI는 초기에는 표시하지 않아도 된다.
+- 초기 버전에서는 Aseprite의 모든 frame을 보여주지 않고, frame 0 기준 레이어 목록만 보여줘도 된다.
+
+수정 대상:
+
+- SUPPORTED_EXTENSIONS에 .ase, .aseprite 추가
+- PsdDecomposerApp._load_file 내부의 PsdDocument(path)를 load_document(path)로 교체
+- 타입 이름이 source_document 같은 중립적 이름이 되면 좋음
+- 오류 타입은 PsdBackendError만 쓰지 말고 DocumentBackendError 또는 AppDocumentError로 확장
+
+
+4.2 파일 백엔드 계층
+
+기존:
+
+- psd_backend.PsdDocument
+
+추가:
+
+- document_backend.py
+- ase_backend.AsepriteDocument
+
+역할:
+
+- 파일 검증
+- 파일 로드
+- 공통 LayerInfo 제공
+- 전체 미리보기 렌더링
+- 개별 레이어 렌더링
+- 개별 레이어 썸네일 렌더링
+
+권장 공통 인터페이스:
+
+class DocumentBackend(Protocol):
+    path: Path
+    layers: tuple[LayerInfo, ...]
+    canvas_size: tuple[int, int]
+
+    def render_preview(self) -> Image.Image: ...
+    def render_layer(self, layer_id: str) -> Image.Image: ...
+    def render_layer_thumbnail(self, layer_id: str, size: tuple[int, int] | None = None) -> Image.Image: ...
+    def get_layer_info(self, layer_id: str) -> LayerInfo: ...
+
+AsepriteDocument는 이 인터페이스를 구현한다.
+
+AsepriteDocument 내부 구성:
+
+class AsepriteDocument:
+    def __init__(self, path: Path):
+        validate_aseprite_input_path(path)
+        self.path = Path(path)
+        self.ase_file = decode_aseprite_file(path)
+        self.layers = self._collect_layers()
+        self._layers_by_id = {layer.id: layer for layer in self.layers}
+
+    def _collect_layers(self) -> tuple[LayerInfo, ...]: ...
+    def render_preview(self) -> Image.Image: ...
+    def render_layer(self, layer_id: str) -> Image.Image: ...
+    def render_layer_thumbnail(self, layer_id: str) -> Image.Image: ...
+    def get_layer_info(self, layer_id: str) -> LayerInfo: ...
+
+중요:
+
+- aseprite_codec은 PIL.Image를 직접 알 필요가 없다.
+- PIL.Image 변환과 레이어 렌더링은 ase_backend.AsepriteDocument에서 담당한다.
+- 이렇게 해야 바이너리 코덱은 순수 파서로 유지된다.
+
+
+4.3 Aseprite 바이너리 코덱 계층
+
+새 패키지:
+
+- psd_decomposer.aseprite_codec
+
+역할:
+
+- .ase/.aseprite 바이너리를 읽는다.
+- AsepriteFile 중간 모델을 만든다.
+- zlib 압축 cel을 해제한다.
+- 레이어, 셀, 태그, 팔레트 chunk를 파싱한다.
+- 알 수 없는 chunk는 raw payload로 보존한다.
+- 추후 writer/encoder 구현을 위해 raw_payload와 dirty flag를 유지한다.
+
+이 계층은 다음을 하지 않는다.
+
+- GUI 처리
+- ExportJob 처리
+- 파일명 생성
+- PNG 저장
+- PSD 저장
+- Tkinter 호출
+- Photoshop COM 호출
+
+권장 공개 API:
+
+from psd_decomposer.aseprite_codec import decode_aseprite_file, decode_aseprite_bytes
+
+ase_file = decode_aseprite_file(path)
+
+
+4.4 데이터 모델 계층
+
+기존:
+
+- LayerInfo
+- ExportJob
+
+LayerInfo 재사용 여부:
+
+Aseprite의 Layer Chunk는 PSD 레이어와 유사하게 다음 정보를 가진다.
+
+- index
+- name
+- visible
+- opacity
+- blend_mode
+- child_level
+- layer_type
+
+현재 LayerInfo는 다음 정보를 가진다.
+
+- id
+- name
+- path
+- visible
+- width
+- height
+- left
+- top
+
+따라서 AsepriteDocument._collect_layers에서 LayerInfo를 생성할 수 있다.
+
+권장 매핑:
+
+- LayerInfo.id = str(layer.index)
+- LayerInfo.name = layer.name
+- LayerInfo.path = child_level 기반으로 계산한 그룹 경로 tuple
+- LayerInfo.visible = layer.visible
+- LayerInfo.width = cel 또는 canvas 기준으로 계산
+- LayerInfo.height = cel 또는 canvas 기준으로 계산
+- LayerInfo.left = 해당 layer의 frame 0 cel x, 없으면 0
+- LayerInfo.top = 해당 layer의 frame 0 cel y, 없으면 0
+
+주의:
+
+- Aseprite는 같은 레이어라도 frame마다 cel 위치/크기가 다를 수 있다.
+- 현재 GUI는 정적인 레이어 목록을 전제로 하므로 초기에는 frame 0 기준으로 LayerInfo를 만든다.
+- 나중에 애니메이션 export를 지원하면 LayerInfo와 별도로 FrameInfo, AnimationTagInfo를 추가해야 한다.
+
+추가 권장 모델:
+
+@dataclass(frozen=True)
+class SourceFormat:
+    # enum 권장: PSD, ASEPRITE
+
+또는 간단히:
+
+class DocumentFormat(Enum):
+    PSD = "psd"
+    ASEPRITE = "aseprite"
+
+ExportJob에 추가할 수 있는 필드:
+
+- source_format: DocumentFormat | None = None
+
+하지만 Exporter가 load_document(job.source_path)로 알아서 열 수 있다면 필수는 아니다.
+
+
+4.5 처리/내보내기 계층
+
+기존 Exporter.export 흐름은 다음과 같다.
+
+1. Exporter.export(job)
+2. 선택 레이어 없으면 오류
+3. PsdDocument(job.source_path)로 PSD 다시 로드
+4. build_output_directory(job)
+5. export_format에 따라 PNG 또는 PSD 분기
+
+Aseprite 지원 후 변경:
+
+1. Exporter.export(job)
+2. 선택 레이어 없으면 오류
+3. load_document(job.source_path)로 문서 다시 로드
+4. build_output_directory(job)
+5. export_format에 따라 PNG 또는 PSD 분기
+
+중요 변경점:
+
+- Exporter가 PsdDocument를 직접 import하지 않도록 한다.
+- Exporter는 DocumentBackend 인터페이스만 사용한다.
+- PNG export는 PSD와 Aseprite 모두 공통으로 처리 가능하다.
+- PSD export는 Photoshop COM 의존이 있으므로 PSD 원본에서만 지원하는 것이 맞다.
+- Aseprite 원본에서 export_format == PSD는 초기에는 비활성화하거나 오류로 처리한다.
+
+수정 대상:
+
+- exporter.py의 PsdDocument(job.source_path)를 load_document(job.source_path)로 변경
+- PSD export 분기에서는 원본 파일이 PSD인지 확인
+- PNG export는 document.render_layer를 통해 포맷 독립적으로 처리
+
+예상 코드 방향:
+
+from psd_decomposer.document_backend import load_document, DocumentFormat
+
+class Exporter:
+    def export(self, job: ExportJob) -> list[Path]:
+        if not job.selected_layer_ids:
+            raise DocumentBackendError("No layers selected.")
+
+        document = load_document(job.source_path)
+        output_directory = build_output_directory(job)
+        output_directory.mkdir(parents=True, exist_ok=True)
+
+        if job.export_format == "PNG":
+            return self._export_png(document, job, output_directory)
+
+        if job.export_format == "PSD":
+            if document.format is not DocumentFormat.PSD:
+                raise DocumentBackendError("PSD export is only available for PSD source files.")
+            return self._export_psd(document, job, output_directory)
+
+
+5. Aseprite 포맷 구현 정보
+
+5.1 전체 구조
+
+.ase와 .aseprite는 같은 포맷으로 취급한다.
+
+파일 구조:
+
+ASE File
+├─ File Header, 128 bytes
+├─ Frame 0
+│  ├─ Frame Header, 16 bytes
+│  ├─ Chunk
+│  ├─ Chunk
+│  └─ ...
+├─ Frame 1
+│  ├─ Frame Header, 16 bytes
+│  ├─ Chunk
+│  └─ ...
+└─ ...
+
+모든 정수는 little-endian이다.
+
+Python struct 기준:
+
+- BYTE    = <B
+- WORD    = <H
+- SHORT   = <h
+- DWORD   = <I
+- LONG    = <i
+- QWORD   = <Q
+- LONG64  = <q
+- STRING  = WORD length + UTF-8 bytes
+
+STRING은 null-terminated가 아니다.
+
+
+5.2 File Header
+
+File Header는 128바이트이다.
+
+주요 필드:
+
+- DWORD File size
+- WORD Magic number = 0xA5E0
+- WORD Frames
+- WORD Width
+- WORD Height
+- WORD Color depth
+  - 32 = RGBA
+  - 16 = Grayscale
+  - 8 = Indexed
+- DWORD Flags
+  - 1 = Layer opacity has valid value
+  - 2 = Layer blend mode/opacity is valid for groups
+  - 4 = Layers have UUID
+- WORD Speed, deprecated
+- DWORD 0
+- DWORD 0
+- BYTE Transparent palette index
+- BYTE[3] ignored
+- WORD Number of colors
+- BYTE Pixel width
+- BYTE Pixel height
+- SHORT Grid X
+- SHORT Grid Y
+- WORD Grid width
+- WORD Grid height
+- BYTE[84] reserved
+
+구현 요구:
+
+- magic number가 0xA5E0이 아니면 AseFormatError
+- color_depth가 8, 16, 32가 아니면 AseUnsupportedFeatureError
+- header는 정확히 128바이트 소비
+- file_size는 실제 파일 크기와 비교해 warning 또는 strict mode 예외 가능
+
+
+5.3 Frame Header
+
+각 frame은 16바이트 header로 시작한다.
+
+필드:
+
+- DWORD Bytes in this frame
+- WORD Magic number = 0xF1FA
+- WORD Old chunk count
+- WORD Frame duration in milliseconds
+- BYTE[2] Reserved
+- DWORD New chunk count
+
+chunk count 결정:
+
+- old_chunk_count == 0xFFFF이면 new_chunk_count 사용
+- 그렇지 않고 new_chunk_count != 0이면 new_chunk_count 사용 가능
+- 그렇지 않으면 old_chunk_count 사용
+
+실용 구현:
+
+if new_chunk_count != 0:
+    chunk_count = new_chunk_count
+else:
+    chunk_count = old_chunk_count
+
+더 엄격한 구현:
+
+if old_chunk_count == 0xFFFF:
+    chunk_count = new_chunk_count
+elif new_chunk_count != 0:
+    chunk_count = new_chunk_count
+else:
+    chunk_count = old_chunk_count
+
+구현 요구:
+
+- frame magic number가 0xF1FA가 아니면 AseFormatError
+- frame_start를 저장하고, frame 처리 후 frame_start + frame_size로 seek 보정
+- chunk 파싱이 어긋나도 다음 frame을 읽을 가능성을 높인다.
+
+
+5.4 Chunk 공통 구조
+
+모든 chunk는 다음 구조를 가진다.
+
+- DWORD Chunk size
+- WORD Chunk type
+- BYTE[] Chunk data
+
+중요:
+
+- chunk size는 DWORD size 필드와 WORD type 필드를 포함한다.
+- payload size = chunk_size - 6
+- chunk_size < 6이면 포맷 오류
+
+모르는 chunk는 버리지 말고 UnknownChunk로 보존한다.
+
+
+5.5 우선 지원할 Chunk
+
+초기 의미론적 파싱 대상:
+
+- 0x2004 Layer Chunk
+- 0x2005 Cel Chunk
+- 0x2018 Tags Chunk
+- 0x2019 Palette Chunk
+
+초기 raw 보존 대상:
+
+- 0x0004 Old Palette Chunk
+- 0x0011 Old Palette Chunk
+- 0x2006 Cel Extra Chunk
+- 0x2007 Color Profile Chunk
+- 0x2008 External Files Chunk
+- 0x2016 Mask Chunk, deprecated
+- 0x2017 Path Chunk, never used
+- 0x2020 User Data Chunk
+- 0x2022 Slice Chunk
+- 0x2023 Tileset Chunk
+
+
+5.6 Layer Chunk, 0x2004
+
+Layer Chunk는 레이어 정보를 담는다.
+
+필드:
+
+- WORD Flags
+  - 1 = Visible
+  - 2 = Editable
+  - 4 = Lock movement
+  - 8 = Background
+  - 16 = Prefer linked cels
+  - 32 = Collapsed group
+  - 64 = Reference layer
+- WORD Layer type
+  - 0 = Normal image layer
+  - 1 = Group
+  - 2 = Tilemap
+- WORD Child level
+- WORD Default layer width, ignored
+- WORD Default layer height, ignored
+- WORD Blend mode
+- BYTE Opacity
+- BYTE[3] Reserved
+- STRING Layer name
+- If layer type == 2: DWORD Tileset index
+- If file header flags has bit 4: UUID, 16 bytes
+
+구현 요구:
+
+- layer chunk 등장 순서가 layer index이다.
+- Cel Chunk의 layer index는 이 순서를 참조한다.
+- visible = bool(flags & 1)
+- child_level은 그룹 경로 계산에 사용한다.
+- tilemap layer는 초기에는 unsupported/보존 대상으로 둔다.
+
+
+5.7 Cel Chunk, 0x2005
+
+Cel은 특정 frame + 특정 layer에 위치한 이미지 조각이다.
+
+공통 필드:
+
+- WORD Layer index
+- SHORT X position
+- SHORT Y position
+- BYTE Opacity
+- WORD Cel type
+  - 0 = Raw Image Data
+  - 1 = Linked Cel
+  - 2 = Compressed Image
+  - 3 = Compressed Tilemap
+- SHORT Z-Index
+- BYTE[5] Reserved
+
+Cel type별 추가 구조:
+
+Type 0, Raw Image Data:
+- WORD Width
+- WORD Height
+- PIXEL[] raw pixel data
+
+Type 1, Linked Cel:
+- WORD Linked frame position
+
+Type 2, Compressed Image:
+- WORD Width
+- WORD Height
+- zlib-compressed PIXEL[] data
+
+Type 3, Compressed Tilemap:
+- tilemap-specific data
+- 초기에는 raw 보존 또는 unsupported
+
+color depth별 pixel size:
+
+- 32 bpp RGBA = 4 bytes per pixel, R/G/B/A
+- 16 bpp Grayscale = 2 bytes per pixel, Value/Alpha
+- 8 bpp Indexed = 1 byte per pixel, palette index
+
+구현 요구:
+
+- type 0, 1, 2 지원
+- type 3은 초기 unsupported
+- type 2는 zlib.decompress 사용
+- 해제 후 expected_size = width * height * bytes_per_pixel 검증
+- Cel width/height는 전체 canvas 크기가 아니라 cel 조각 크기이다.
+
+
+5.8 Tags Chunk, 0x2018
+
+애니메이션 구간 정보를 담는다.
+
+필드:
+
+- WORD Number of tags
+- BYTE[8] Reserved
+
+각 tag:
+
+- WORD From frame
+- WORD To frame
+- BYTE Loop direction
+  - 0 = Forward
+  - 1 = Reverse
+  - 2 = Ping-pong
+  - 3 = Ping-pong Reverse
+- WORD Repeat N times
+- BYTE[6] Reserved
+- BYTE[3] RGB tag color, deprecated
+- BYTE Extra byte
+- STRING Tag name
+
+구현 요구:
+
+- AsepriteFile.tags에 수집한다.
+- GUI 통합 1차에서는 표시하지 않아도 되지만 모델에는 반드시 보존한다.
+
+
+5.9 Palette Chunk, 0x2019
+
+Indexed color mode 지원에 필요하다.
+
+필드:
+
+- DWORD New palette size
+- DWORD First color index to change
+- DWORD Last color index to change
+- BYTE[8] Reserved
+
+각 palette entry:
+
+- WORD Entry flags
+  - 1 = Has name
+- BYTE Red
+- BYTE Green
+- BYTE Blue
+- BYTE Alpha
+- If has name: STRING Color name
+
+구현 요구:
+
+- 32bpp RGBA에서는 팔레트가 없어도 정상이다.
+- 8bpp Indexed에서는 팔레트가 없으면 RGBA 렌더링 불가로 처리한다.
+- old palette chunk는 new palette chunk가 있으면 무시할 수 있으나 raw 보존은 유지한다.
+
+
+5.10 User Data Chunk, 0x2020
+
+초기에는 완전 해석하지 않는다.
+
+중요 특징:
+
+- User Data Chunk는 직전에 읽은 객체에 붙는 부가 데이터이다.
+- 예: 직전 chunk가 layer이면 해당 layer의 user data이다.
+- Tags Chunk 뒤에는 tag별 user data chunk가 여러 개 따라올 수 있다.
+
+초기 구현:
+
+- UnknownChunk로 raw 보존
+- DecoderContext에 last_meaningful_object를 둘 수 있게 구조만 열어 둔다.
+
+
+6. aseprite_codec 모델 설계
+
+6.1 AsepriteFile
+
+@dataclass
+class AsepriteFile:
+    header: AseHeader
+    frames: list[AseFrame]
+    layers: list[LayerChunk]
+    tags: list[Tag]
+    palettes: list[PaletteChunk]
+    unknown_chunks: list[UnknownChunk]
+
+
+6.2 AseHeader
+
+@dataclass
+class AseHeader:
+    file_size: int
+    frames: int
+    width: int
+    height: int
+    color_depth: int
+    flags: int
+    speed_deprecated: int
+    transparent_palette_index: int
+    color_count: int
+    pixel_width: int
+    pixel_height: int
+    grid_x: int
+    grid_y: int
+    grid_width: int
+    grid_height: int
+
+
+6.3 AseFrame
+
+@dataclass
+class AseFrame:
+    index: int
+    size: int
+    duration_ms: int
+    chunks: list[AseChunk]
+    cels: list[CelChunk]
+
+
+6.4 LayerChunk
+
+@dataclass
+class LayerChunk:
+    index: int
+    flags: int
+    visible: bool
+    layer_type: int
+    child_level: int
+    blend_mode: int
+    opacity: int
+    name: str
+    tileset_index: int | None = None
+    uuid: bytes | None = None
+    raw_payload: bytes | None = None
+    dirty: bool = False
+
+
+6.5 CelChunk
+
+@dataclass
+class CelChunk:
+    layer_index: int
+    x: int
+    y: int
+    opacity: int
+    cel_type: int
+    z_index: int
+    width: int | None = None
+    height: int | None = None
+    pixels: bytes | None = None
+    linked_frame: int | None = None
+    raw_payload: bytes | None = None
+    compressed_payload: bytes | None = None
+    dirty: bool = False
+
+
+6.6 Tag
+
+@dataclass
+class Tag:
+    from_frame: int
+    to_frame: int
+    loop_direction: int
+    repeat: int
+    name: str
+    color_rgb: tuple[int, int, int] | None = None
+
+
+6.7 PaletteEntry / PaletteChunk
+
+@dataclass
+class PaletteEntry:
+    index: int
+    r: int
+    g: int
+    b: int
+    a: int
+    name: str | None = None
+    flags: int = 0
+
+@dataclass
+class PaletteChunk:
+    palette_size: int
+    first_index: int
+    last_index: int
+    entries: list[PaletteEntry]
+
+
+6.8 UnknownChunk
+
+@dataclass
+class UnknownChunk:
+    chunk_type: int
+    payload: bytes
+
+
+7. AsepriteDocument 설계
+
+AsepriteDocument는 PsdDocument와 동일한 수준의 백엔드 어댑터이다.
+
+역할:
+
+- aseprite_codec.decode_aseprite_file 호출
+- LayerChunk를 LayerInfo로 변환
+- CelChunk를 PIL.Image로 변환
+- frame 0 기준 미리보기와 레이어 썸네일 제공
+- PNG Exporter가 document.render_layer(layer_id)를 그대로 사용할 수 있게 함
+
+초기 렌더링 방침:
+
+- 1차: frame 0 기준으로만 렌더링
+- 1차: RGBA 32bpp만 완전 지원
+- 1차: Normal blend + alpha_composite만 지원
+- 1차: group layer의 별도 composite는 보류
+- 1차: indexed/grayscale은 파싱은 하되 렌더링은 unsupported 가능
+
+AsepriteDocument.render_layer(layer_id):
+
+- frame 0에서 해당 layer_index의 cel을 찾는다.
+- linked cel이면 linked_frame의 같은 layer cel을 찾는다.
+- cel_type 0/2이면 pixels를 PIL.Image.frombytes("RGBA", (width, height), pixels)로 변환한다.
+- 해당 layer의 cel이 없으면 투명 이미지 반환 또는 오류 처리한다.
+- 반환 이미지는 PSD의 render_layer와 맞추기 위해 cel 크기 이미지를 반환한다.
+
+AsepriteDocument.render_preview():
+
+- header.width x header.height 크기의 투명 RGBA canvas 생성
+- frame 0의 cels를 layer order + z_index 기준으로 정렬
+- visible layer만 합성
+- cel 이미지를 x/y 위치에 alpha_composite
+- 초기에는 Normal blend만 처리
+
+AsepriteDocument.render_layer_thumbnail(layer_id):
+
+- render_layer(layer_id)
+- thumbnail 적용
+- 실패 시 투명 이미지 반환
+
+
+8. GUI 통합 상세
+
+8.1 확장자 지원
+
+현재 SUPPORTED_EXTENSIONS가 PSD 중심이면 다음으로 확장한다.
+
+SUPPORTED_EXTENSIONS = {".psd", ".psb", ".ase", ".aseprite"}
+
+실제 psb 지원 여부는 현재 정책에 맞춘다.
+
+8.2 _load_file 변경
+
+기존:
+
+self.document = PsdDocument(path)
+
+변경:
+
+self.document = load_document(path)
+
+load_document는 확장자에 따라 PsdDocument 또는 AsepriteDocument를 반환한다.
+
+8.3 드롭 존 표시
+
+기존 드롭 존은 preview_image.width/height를 사용한다.
+
+AsepriteDocument.render_preview가 PIL.Image를 반환하면 기존 표시 흐름을 그대로 사용할 수 있다.
+
+8.4 레이어 테이블
+
+AsepriteDocument.layers가 tuple[LayerInfo, ...]를 반환하면 _populate_layers는 그대로 재사용 가능하다.
+
+주의:
+
+- Aseprite group layer는 이미지 cel이 없을 수 있다.
+- 초기에는 group layer를 선택 불가로 할지, 표시만 할지 결정해야 한다.
+- 가장 단순한 방식은 group layer도 표시하되 render_layer에서 투명 이미지를 반환하는 것이다.
+- 더 나은 방식은 LayerInfo에 selectable 필드를 추가하는 것이지만 변경 범위가 커진다.
+
+초기 권장:
+
+- group layer도 표시한다.
+- group layer의 width/height는 0 또는 canvas 크기로 둔다.
+- 내보내기 시 group layer가 선택되면 빈 이미지가 나올 수 있으므로 GUI에서 비활성화하는 개선은 추후 처리한다.
+
+
+9. Exporter 통합 상세
+
+9.1 Exporter.export
+
+기존 PsdDocument 직접 생성 제거:
+
+- from psd_decomposer.psd_backend import PsdDocument 제거
+- from psd_decomposer.document_backend import load_document, DocumentFormat 추가
+
+변경 전:
+
+document = PsdDocument(job.source_path)
+
+변경 후:
+
+document = load_document(job.source_path)
+
+9.2 PNG export
+
+_export_png는 거의 그대로 유지 가능하다.
+
+전제:
+
+- document.get_layer_info(layer_id)
+- document.render_layer(layer_id)
+- document.canvas_size 또는 document.width/height
+
+현재 _prepare_png_image가 PsdDocument 전용 타입 힌트를 가지고 있다면 DocumentBackend로 바꾼다.
+
+9.3 PSD export
+
+PSD export는 PSD 원본에서만 허용한다.
+
+Aseprite 원본에서 PSD export 요청이 들어오면:
+
+- GUI에서 PSD 옵션 비활성화하거나
+- Exporter에서 DocumentBackendError 발생
+
+권장:
+
+- GUI의 format radio button 상태를 source document format에 따라 갱신한다.
+- Aseprite 로드 시 PSD export 비활성화.
+
+
+10. 저장/인코더 대비 설계
+
+이번 목표는 바이너리 파싱/중간계층까지다.
+
+하지만 나중에 writing까지 갈 예정이므로 다음 조건을 지킨다.
+
+- 각 chunk dataclass에 raw_payload를 보존한다.
+- CelChunk는 compressed_payload도 보존한다.
+- parsed field를 수정하지 않은 경우 raw_payload를 다시 쓸 수 있게 dirty flag를 둔다.
+- UnknownChunk는 반드시 보존한다.
+- frame 내 chunk 순서를 보존한다.
+- AsepriteFile.frames[].chunks에 실제 chunk 순서를 남긴다.
+- layers/tags/palettes 같은 전역 수집 목록은 convenience view로 취급한다.
+
+중요:
+
+AsepriteFile.layers는 편의용 목록이고, 원본 저장 순서는 frame.chunks가 진짜 source of truth가 되어야 한다.
+
+
+11. 구현 단계
+
+Phase 1: 공통 문서 로더 도입
+
+- document_backend.py 생성
+- DocumentFormat enum 추가
+- DocumentBackend Protocol 추가
+- load_document(path) 추가
+- .psd는 기존 PsdDocument 반환
+- .ase/.aseprite는 아직 NotImplementedError 반환 가능
+
+완료 기준:
+
+- 기존 PSD 기능이 깨지지 않는다.
+- GUI와 Exporter가 PsdDocument 직접 생성 대신 load_document를 사용할 준비가 된다.
+
+
+Phase 2: aseprite_codec 기본 바이너리 유틸
+
+- aseprite_codec 패키지 생성
+- binary.py 작성
+- read_u8, read_u16, read_i16, read_u32, read_i32, read_string 구현
+- EOF 방어
+- errors.py 작성
+
+완료 기준:
+
+- 단위 테스트로 기본 타입 읽기 검증
+
+
+Phase 3: Header / Frame / Chunk 순회
+
+- AseHeader 파싱
+- AseFrame 파싱
+- chunk 공통 헤더 파싱
+- UnknownChunk 보존
+- chunk type dump 가능
+
+완료 기준:
+
+- 임의 .aseprite 파일에서 header, frame count, frame별 chunk type 목록 출력 가능
+
+
+Phase 4: Layer Chunk
+
+- LayerChunk 파싱
+- layer index 부여
+- visible/name/type/child_level 읽기
+
+완료 기준:
+
+- 파일 내 레이어 이름 목록 정확히 출력
+
+
+Phase 5: Tags Chunk
+
+- Tags Chunk 파싱
+- AsepriteFile.tags에 수집
+
+완료 기준:
+
+- Idle, Walk, Attack 같은 tag 이름과 frame range 출력 가능
+
+
+Phase 6: Cel Chunk
+
+- Cel type 0 raw image 지원
+- Cel type 1 linked cel 지원
+- Cel type 2 compressed image 지원
+- zlib decompress
+- pixel byte length 검증
+
+완료 기준:
+
+- frame 0의 cel 위치/크기/레이어 index 출력 가능
+- RGBA cel pixels 확보 가능
+
+
+Phase 7: Palette Chunk
+
+- Palette Chunk 파싱
+- indexed mode 렌더링 준비
+
+완료 기준:
+
+- palette entry RGBA 값 읽기 가능
+
+
+Phase 8: AsepriteDocument 추가
+
+- ase_backend.py 작성
+- AsepriteDocument.__init__에서 decode_aseprite_file 호출
+- _collect_layers 구현
+- render_layer 구현
+- render_preview 구현
+- render_layer_thumbnail 구현
+
+완료 기준:
+
+- GUI에서 .aseprite 파일을 열면 레이어 목록과 미리보기가 표시된다.
+
+
+Phase 9: PNG Export 통합
+
+- Exporter가 load_document 사용
+- PNG export가 AsepriteDocument에도 동작
+- PSD export는 PSD 원본에서만 허용
+
+완료 기준:
+
+- .aseprite 파일에서 선택 레이어를 PNG로 저장 가능
+
+
+Phase 10: writer 준비 마무리
+
+- encoder.py placeholder 생성
+- write_u8/write_u16/write_u32/write_string 등 binary writer 유틸 추가 가능
+- dirty flag와 raw_payload가 유지되는지 테스트
+
+완료 기준:
+
+- 아직 저장은 하지 않지만, encoder 구현 시 chunk preservation이 가능한 구조가 되어 있음
+
+
+12. 테스트 전략
+
+필요한 테스트 파일:
+
+1. single_layer_single_frame_rgba.aseprite
+   - 32bpp
+   - 1 layer
+   - 1 frame
+   - compressed cel
+
+2. multi_frame_tags_rgba.aseprite
+   - 여러 frame
+   - Idle / Walk tag 포함
+
+3. multi_layer_rgba.aseprite
+   - 여러 layer
+   - visible/invisible layer 포함
+   - group layer 포함 가능
+
+4. linked_cel_rgba.aseprite
+   - linked cel 포함
+
+5. indexed_palette.aseprite
+   - 8bpp indexed
+   - palette chunk 포함
+
+6. unknown_chunks_preservation.aseprite
+   - user data, slice, color profile 등이 들어간 파일
+   - 초기에는 raw 보존 여부만 검증
+
+테스트 항목:
+
+- header width/height/frame count 일치
+- layer 개수와 이름 일치
+- frame duration 일치
+- tag 이름/from/to 일치
+- cel layer index/x/y/width/height 일치
+- compressed cel decompress 후 pixel byte length 일치
+- unknown chunk가 버려지지 않았는지 확인
+- AsepriteDocument.render_preview가 PIL.Image를 반환하는지 확인
+- AsepriteDocument.render_layer가 PIL.Image를 반환하는지 확인
+- Exporter PNG export가 PSD와 ASE 양쪽에서 동작하는지 확인
+
+
+13. 비목표
+
+이번 단계에서 하지 않을 것:
+
+- .aseprite 파일 저장
+- byte-perfect round-trip 저장 보장
+- 모든 blend mode 합성
+- group layer 별도 composite 완전 구현
+- tilemap 완전 지원
+- slice 9-patch 완전 지원
+- User Data property map 완전 지원
+- ICC color profile 적용
+- animation spritesheet export
+- frame/tag 선택 UI
+- Aseprite 원본에서 PSD export
+
+단, 나중에 구현할 수 있도록 raw_payload, frame.chunks 순서, dirty flag는 유지한다.
+
+
+14. Codex에게 특히 지시할 주의사항
+
+- GUI에 바이너리 파싱 코드를 넣지 말 것.
+- Exporter에 Aseprite chunk 파싱 코드를 넣지 말 것.
+- psd_backend.py에 Aseprite 코드를 섞지 말 것.
+- aseprite_codec은 순수 바이너리 파서로 유지할 것.
+- AsepriteDocument는 PsdDocument와 같은 역할의 백엔드 어댑터로 만들 것.
+- Exporter는 PsdDocument 대신 DocumentBackend를 사용하도록 바꿀 것.
+- UnknownChunk는 절대 버리지 말 것.
+- frame.chunks 순서를 보존할 것.
+- layer index는 Layer Chunk 등장 순서임을 지킬 것.
+- compressed cel은 zlib.decompress로 해제할 것.
+- 1차 렌더링은 32bpp RGBA + frame 0 + Normal blend만 지원해도 된다.
+- 기존 PSD 기능이 깨지지 않도록 단계별로 통합할 것.
+
+
+15. 참고 출처
+
+- Aseprite 공식 파일 문서: .ase와 .aseprite 파일은 Aseprite 파일 포맷이며 sprite 정보를 저장한다.
+- Aseprite 공식 ase-file-specs.md: little-endian, header/frame/chunk 구조, Layer/Cel/Tags/Palette/User Data chunk 구조를 정의한다.
+- 현재 psd_decomposer 아키텍처 문서: GUI, PSD backend, models, config, naming, exporter의 현재 역할과 실행 흐름을 기준으로 통합 위치를 결정했다.

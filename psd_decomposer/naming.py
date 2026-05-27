@@ -11,12 +11,16 @@ INVALID_FILENAME_CHARS = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
 
 
 def sanitize_filename_part(value: str) -> str:
+    """Windows 파일명에서 사용할 수 없는 문자를 안전한 문자로 치환합니다."""
+
     cleaned = INVALID_FILENAME_CHARS.sub("_", value).strip().strip(".")
     cleaned = re.sub(r"\s+", " ", cleaned)
     return cleaned or "layer"
 
 
 def build_output_directory(job: ExportJob) -> Path:
+    """하위 폴더 묶기 옵션을 반영한 실제 출력 폴더를 계산합니다."""
+
     directory = job.output_directory
     if job.wrap_with_folder:
         directory = directory / f"{sanitize_filename_part(job.source_path.stem)}_decomposed"
@@ -24,6 +28,8 @@ def build_output_directory(job: ExportJob) -> Path:
 
 
 def build_base_name(job: ExportJob, layer: LayerInfo, today: date | None = None) -> str:
+    """원본명, 레이어명, 날짜 옵션을 조합해 확장자 없는 기본 파일명을 만듭니다."""
+
     today = today or date.today()
     parts: list[str] = []
     if job.include_original_name:
@@ -39,6 +45,8 @@ def build_base_name(job: ExportJob, layer: LayerInfo, today: date | None = None)
 
 
 def unique_output_path(directory: Path, base_name: str, extension: str) -> Path:
+    """기존 파일과 충돌하지 않는 파일 경로를 순번 suffix로 찾습니다."""
+
     extension = extension.lower().lstrip(".")
     candidate = directory / f"{base_name}.{extension}"
     if not candidate.exists():
@@ -59,8 +67,11 @@ def resolve_output_path(
     overwrite_existing: bool,
     reserved_paths: set[Path],
 ) -> Path:
+    """덮어쓰기 옵션과 같은 배치 내 예약 경로를 모두 고려해 출력 경로를 정합니다."""
+
     extension = extension.lower().lstrip(".")
     candidate = directory / f"{base_name}.{extension}"
+    # reserved_paths는 같은 내보내기 작업에서 방금 만든 파일을 자기 자신이 덮지 않게 막습니다.
     if candidate not in reserved_paths and (overwrite_existing or not candidate.exists()):
         reserved_paths.add(candidate)
         return candidate
