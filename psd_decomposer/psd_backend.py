@@ -4,10 +4,14 @@ from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
 
-from .models import LayerInfo, SUPPORTED_EXTENSIONS
+from .document_backend import DocumentBackendError, DocumentFormat
+from .models import LayerInfo
 
 
-class PsdBackendError(RuntimeError):
+PSD_EXTENSIONS = {".psd"}
+
+
+class PsdBackendError(DocumentBackendError):
     """GUI에 그대로 표시할 수 있는 PSD 처리 오류입니다."""
 
     pass
@@ -18,13 +22,15 @@ def validate_input_path(path: Path) -> None:
 
     if not path.exists():
         raise PsdBackendError(f"파일이 존재하지 않습니다: {path}")
-    if path.suffix.lower() not in SUPPORTED_EXTENSIONS:
-        supported = ", ".join(sorted(SUPPORTED_EXTENSIONS))
+    if path.suffix.lower() not in PSD_EXTENSIONS:
+        supported = ", ".join(sorted(PSD_EXTENSIONS))
         raise PsdBackendError(f"지원하지 않는 확장자입니다. 지원 형식: {supported}")
 
 
 class PsdDocument:
     """psd-tools로 PSD를 열고 레이어 탐색과 렌더링을 제공하는 어댑터입니다."""
+
+    format = DocumentFormat.PSD
 
     def __init__(self, path: Path) -> None:
         validate_input_path(path)

@@ -10,9 +10,9 @@ from tkinter import filedialog, messagebox, ttk
 from PIL import Image, ImageTk
 
 from .config import AppSettings
+from .document_backend import DocumentBackend, DocumentBackendError, SUPPORTED_EXTENSIONS, load_document, to_document_error
 from .exporter import Exporter
-from .models import ExportJob, LayerInfo, SUPPORTED_EXTENSIONS
-from .psd_backend import PsdBackendError, PsdDocument
+from .models import ExportJob, LayerInfo
 
 
 DROP_ZONE_HEIGHT = 122
@@ -45,14 +45,17 @@ def resource_base_paths() -> list[Path]:
 
 try:
     from tkinterdnd2 import DND_FILES, TkinterDnD
-except ImportError:
+except ImportError as exc:
     # 드래그 앤 드롭은 선택 기능이므로, 모듈이 없을 때도 파일 찾기 버튼으로 동작하게 둡니다.
     DND_FILES = None
     TkinterDnD = None
+    TKINTERDND_IMPORT_ERROR = exc
+else:
+    TKINTERDND_IMPORT_ERROR = None
 
 
 class PsdDecomposerApp:
-    """PSD 파일 입력, 레이어 선택, 출력 옵션, 내보내기 실행을 담당하는 Tkinter 앱입니다."""
+    """지원 파일 입력, 레이어 선택, 출력 옵션, 내보내기 실행을 담당하는 Tkinter 앱입니다."""
 
     def __init__(self, root: tk.Tk) -> None:
         """애플리케이션 상태 변수를 준비하고 전체 GUI를 구성합니다."""
@@ -63,7 +66,7 @@ class PsdDecomposerApp:
         self.root.minsize(820, 760)
 
         self.settings = AppSettings.load()
-        self.document: PsdDocument | None = None
+        self.document: DocumentBackend | None = None
         self.source_path: Path | None = None
         self.layer_vars: dict[str, tk.BooleanVar] = {}
         self.layer_photos: list[ImageTk.PhotoImage] = []
@@ -87,7 +90,7 @@ class PsdDecomposerApp:
         self.layer_bounds_var = tk.StringVar(value="preserve" if self.settings.preserve_canvas else "crop")
         self.select_all_var = tk.BooleanVar(value=False)
         self.progress_var = tk.DoubleVar(value=0)
-        self.status_var = tk.StringVar(value="PSD 파일을 선택하거나 드래그 앤 드롭하세요.")
+        self.status_var = tk.StringVar(value="PSD 또는 Aseprite 파일을 선택하거나 드래그 앤 드롭하세요.")
 
         self._build_ui()
         self._bind_drag_and_drop()
@@ -119,11 +122,11 @@ class PsdDecomposerApp:
         self.drop_zone.rowconfigure(1, weight=1)
         self.drop_zone.columnconfigure(1, weight=1)
         self.drop_image_label = ttk.Label(self.drop_zone, anchor="center")
-        self.drop_title_label = ttk.Label(self.drop_zone, text="PSD 파일을 여기에 드롭하세요", anchor="w")
+        self.drop_title_label = ttk.Label(self.drop_zone, text="PSD 또는 Aseprite 파일을 여기에 드롭하세요", anchor="w")
         self.drop_detail_label = ttk.Label(self.drop_zone, text="또는 파일 찾기 버튼을 사용하세요.", anchor="w")
         self.drop_placeholder = ttk.Label(
             self.drop_zone,
-            text="PSD 파일을 여기에 드롭하세요.\n또는 파일 찾기 버튼을 사용하세요.",
+            text="PSD 또는 Aseprite 파일을 여기에 드롭하세요.\n또는 파일 찾기 버튼을 사용하세요.",
             anchor="center",
             justify="center",
         )
@@ -140,7 +143,7 @@ class PsdDecomposerApp:
 
         output_dir_label = ttk.Label(path_frame, text="출력 폴더")
         output_dir_label.grid(row=1, column=0, sticky="w", pady=(8, 0))
-        Tooltip(output_dir_label, "분리한 레이어 파일을 저장할 폴더입니다.\n파일이 로드되면 원본 PSD가 있는 폴더로 갱신됩니다.")
+        Tooltip(output_dir_label, "분리한 레이어 파일을 저장할 폴더입니다.\n파일이 로드되면 원본 파일이 있는 폴더로 갱신됩니다.")
         ttk.Entry(path_frame, textvariable=self.output_dir_var).grid(row=1, column=1, sticky="ew", padx=(8, 0), pady=(8, 0))
         ttk.Button(path_frame, text="경로 찾기...", command=self._browse_output_dir).grid(row=1, column=2, padx=(8, 0), pady=(8, 0))
 
@@ -267,11 +270,30 @@ class PsdDecomposerApp:
         """드롭 존과 내부 라벨에 동일한 파일 드롭 이벤트를 연결합니다."""
 
         if TkinterDnD is None or DND_FILES is None:
-            self.drop_detail_label.configure(text="드래그 앤 드롭을 사용하려면 tkinterdnd2가 필요합니다.")
+            message = "드래그 앤 드롭을 사용하려면 tkinterdnd2가 필요합니다."
+            if TKINTERDND_IMPORT_ERROR is not None:
+                message = f"{message}\n감지된 오류: {TKINTERDND_IMPORT_ERROR}"
+            self.drop_detail_label.configure(text=message)
+            self.drop_placeholder.configure(text=f"{message}\n파일 찾기 버튼을 사용하세요.")
             return
-        for widget in (self.drop_zone, self.drop_image_label, self.drop_title_label, self.drop_detail_label, self.drop_placeholder):
+
+        # Windows의 tkinterdnd2는 마우스 아래의 실제 하위 위젯에 따라 Drop 이벤트가 달라질 수 있습니다.
+        # 루트와 드롭 존 전체에 함께 등록해 placeholder/썸네일/라벨 위에서도 같은 핸들러가 호출되게 합니다.
+        for widget in self._drop_target_widgets():
             widget.drop_target_register(DND_FILES)
             widget.dnd_bind("<<Drop>>", self._handle_drop)
+
+    def _drop_target_widgets(self) -> tuple[tk.Widget, ...]:
+        """드롭 이벤트를 받아야 하는 루트와 드롭 존 하위 위젯을 반환합니다."""
+
+        return (
+            self.root,
+            self.drop_zone,
+            self.drop_image_label,
+            self.drop_title_label,
+            self.drop_detail_label,
+            self.drop_placeholder,
+        )
 
     def _detect_psd_export_status(self) -> tuple[bool, str]:
         """PSD 저장에 필요한 pywin32와 Photoshop COM 등록 상태를 확인합니다."""
@@ -296,10 +318,15 @@ class PsdDecomposerApp:
         return "break"
 
     def _browse_file(self) -> None:
-        """파일 선택 대화상자에서 PSD를 선택해 로드합니다."""
+        """파일 선택 대화상자에서 지원 문서를 선택해 로드합니다."""
 
-        filetypes = [("PSD 파일", "*.psd"), ("모든 파일", "*.*")]
-        selected = filedialog.askopenfilename(title="PSD 열기", filetypes=filetypes)
+        filetypes = [
+            ("지원 파일", "*.psd *.ase *.aseprite"),
+            ("PSD 파일", "*.psd"),
+            ("Aseprite 파일", "*.ase *.aseprite"),
+            ("모든 파일", "*.*"),
+        ]
+        selected = filedialog.askopenfilename(title="파일 열기", filetypes=filetypes)
         if selected:
             self._load_file(Path(selected))
 
@@ -311,30 +338,36 @@ class PsdDecomposerApp:
             self.output_dir_var.set(selected)
 
     def _handle_drop(self, event) -> None:
-        """드롭된 파일 목록 중 첫 번째 파일을 PSD 입력으로 처리합니다."""
+        """드롭된 파일 목록 중 첫 번째 파일을 입력 문서로 처리합니다."""
 
         paths = self.root.tk.splitlist(event.data)
         if paths:
             self._load_file(Path(paths[0]))
 
     def _load_file(self, path: Path) -> None:
-        """PSD 파일을 열고 미리보기, 출력 폴더, 레이어 테이블을 갱신합니다."""
+        """지원 문서를 열고 미리보기, 출력 폴더, 레이어 테이블을 갱신합니다."""
 
         if path.suffix.lower() not in SUPPORTED_EXTENSIONS:
             # 잘못된 확장자는 기존에 로드된 파일 상태를 유지한 채 경고만 표시합니다.
-            messagebox.showwarning("지원하지 않는 파일", "현재는 PSD 파일만 지원합니다.")
+            supported = ", ".join(sorted(SUPPORTED_EXTENSIONS))
+            messagebox.showwarning("지원하지 않는 파일", f"지원 형식: {supported}")
             return
+        previous_status = self.status_var.get()
+        previous_placeholder_text = self.drop_placeholder.cget("text")
+        had_loaded_file = self.source_path is not None
         self._show_file_processing_message()
         try:
-            self.document = PsdDocument(path)
-            preview_image = self.document.render_preview()
-        except PsdBackendError as exc:
-            messagebox.showerror("파일 열기 실패", str(exc))
+            document = load_document(path)
+            preview_image = document.render_preview()
+        except Exception as exc:
+            self._restore_drop_zone_after_failed_load(had_loaded_file, previous_placeholder_text, previous_status)
+            messagebox.showerror("파일 열기 실패", str(to_document_error(exc)))
             return
 
+        self.document = document
         self.source_path = path
         self.source_var.set(str(path))
-        # 새 파일을 열면 출력 폴더도 해당 PSD가 있는 폴더로 자동 동기화합니다.
+        # 새 파일을 열면 출력 폴더도 해당 원본 파일이 있는 폴더로 자동 동기화합니다.
         self.output_dir_var.set(str(path.parent))
         self._update_drop_zone(path, preview_image)
         self._populate_layers(self.document.layers)
@@ -342,8 +375,32 @@ class PsdDecomposerApp:
         self._hide_progress_bar()
         self.status_var.set(f"{path.name}에서 레이어 {len(self.document.layers)}개를 불러왔습니다.")
 
+    def _restore_drop_zone_after_failed_load(
+        self,
+        had_loaded_file: bool,
+        placeholder_text: str,
+        status_text: str,
+    ) -> None:
+        """파일 로드 실패 시 드롭 존을 시도 직전 상태로 되돌립니다."""
+
+        self.progress_var.set(0)
+        self._hide_progress_bar()
+        self.status_var.set(status_text)
+        if had_loaded_file:
+            self.drop_placeholder.grid_remove()
+            self.drop_image_label.grid(row=0, column=0, rowspan=2, sticky="nsw")
+            self.drop_title_label.grid(row=0, column=1, sticky="sew", padx=(10, 0))
+            self.drop_detail_label.grid(row=1, column=1, sticky="new", padx=(10, 0), pady=(4, 0))
+            return
+
+        self.drop_image_label.grid_remove()
+        self.drop_title_label.grid_remove()
+        self.drop_detail_label.grid_remove()
+        self.drop_placeholder.configure(text=placeholder_text)
+        self.drop_placeholder.grid(row=0, column=0, rowspan=2, columnspan=2, sticky="nsew")
+
     def _show_file_processing_message(self) -> None:
-        """PSD 로드가 시작되었음을 드롭 존과 하단 상태 영역에 즉시 표시합니다."""
+        """파일 로드가 시작되었음을 드롭 존과 하단 상태 영역에 즉시 표시합니다."""
 
         self.drop_image_label.grid_remove()
         self.drop_title_label.grid_remove()
@@ -436,7 +493,7 @@ class PsdDecomposerApp:
         assert self.document is not None
         try:
             thumbnail = self.document.render_layer_thumbnail(layer_id)
-        except PsdBackendError:
+        except DocumentBackendError:
             thumbnail = Image.new("RGBA", (48, 48), (0, 0, 0, 0))
         return ImageTk.PhotoImage(thumbnail)
 
@@ -507,7 +564,7 @@ class PsdDecomposerApp:
         """현재 GUI 상태를 Exporter가 사용할 불변 작업 데이터로 변환합니다."""
 
         if self.source_path is None:
-            raise PsdBackendError("PSD 파일을 먼저 선택하세요.")
+            raise DocumentBackendError("파일을 먼저 선택하세요.")
         return ExportJob(
             source_path=self.source_path,
             output_directory=Path(self.output_dir_var.get().strip() or self.source_path.parent),
@@ -526,7 +583,7 @@ class PsdDecomposerApp:
         """내보내기 설정을 저장하고 백그라운드 스레드에서 Exporter를 실행합니다."""
 
         if self.source_path is None:
-            messagebox.showwarning("파일 없음", "PSD 파일을 먼저 선택하세요.")
+            messagebox.showwarning("파일 없음", "파일을 먼저 선택하세요.")
             return
         selected_layer_ids = self._current_selected_layer_ids()
         job = self._create_export_job(selected_layer_ids)

@@ -1,12 +1,19 @@
 # -*- mode: python ; coding: utf-8 -*-
+from PyInstaller.utils.hooks import collect_data_files
+
+
+tkinterdnd2_datas = collect_data_files('tkinterdnd2')
+app_datas = [
+    ('assets\\app.ico', 'assets'),
+]
 
 
 a = Analysis(
     ['main.py'],
     pathex=[],
     binaries=[],
-    datas=[],
-    hiddenimports=[],
+    datas=tkinterdnd2_datas + app_datas,
+    hiddenimports=['tkinterdnd2', 'tkinterdnd2.TkinterDnD'],
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],

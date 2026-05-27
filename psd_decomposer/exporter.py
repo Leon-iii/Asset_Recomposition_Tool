@@ -7,9 +7,10 @@ from typing import Callable
 
 from PIL import Image
 
+from .document_backend import DocumentBackend, DocumentFormat, load_document
 from .models import ExportJob
 from .naming import build_base_name, build_output_directory, resolve_output_path
-from .psd_backend import PsdBackendError, PsdDocument
+from .psd_backend import PsdBackendError
 
 
 ProgressCallback = Callable[[str], None]
@@ -29,17 +30,19 @@ class Exporter:
         if not job.selected_layer_ids:
             raise PsdBackendError("내보낼 레이어를 하나 이상 선택하세요.")
 
-        document = PsdDocument(job.source_path)
+        document = load_document(job.source_path)
         output_directory = build_output_directory(job)
         output_directory.mkdir(parents=True, exist_ok=True)
 
         if job.export_format == "PNG":
             return self._export_png(document, job, output_directory)
         if job.export_format == "PSD":
+            if document.format is not DocumentFormat.PSD:
+                raise PsdBackendError("PSD 내보내기는 PSD 원본 파일에서만 사용할 수 있습니다.")
             return self._export_psd(document, job, output_directory)
         raise PsdBackendError(f"지원하지 않는 출력 형식입니다: {job.export_format}")
 
-    def _export_png(self, document: PsdDocument, job: ExportJob, output_directory: Path) -> list[Path]:
+    def _export_png(self, document: DocumentBackend, job: ExportJob, output_directory: Path) -> list[Path]:
         """psd-tools가 렌더링한 레이어 이미지를 PNG 파일로 저장합니다."""
 
         outputs: list[Path] = []
@@ -70,7 +73,7 @@ class Exporter:
         return outputs
 
     @staticmethod
-    def _prepare_png_image(document: PsdDocument, layer_id: str, preserve_canvas: bool) -> Image.Image:
+    def _prepare_png_image(document: DocumentBackend, layer_id: str, preserve_canvas: bool) -> Image.Image:
         """레이어를 원본 캔버스에 얹거나, 레이어 자체 크기로 crop한 이미지를 준비합니다."""
 
         layer = document.get_layer_info(layer_id)
@@ -93,7 +96,7 @@ class Exporter:
             canvas.alpha_composite(cropped, dest=(dest_left, dest_top))
         return canvas
 
-    def _export_psd(self, document: PsdDocument, job: ExportJob, output_directory: Path) -> list[Path]:
+    def _export_psd(self, document: DocumentBackend, job: ExportJob, output_directory: Path) -> list[Path]:
         """Photoshop COM 자동화로 원본 PSD를 복제한 뒤 선택 레이어만 남겨 저장합니다."""
 
         try:

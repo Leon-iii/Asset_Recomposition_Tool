@@ -4,9 +4,6 @@ from dataclasses import dataclass
 from pathlib import Path
 
 
-SUPPORTED_EXTENSIONS = {".psd"}
-
-
 @dataclass(frozen=True)
 class LayerInfo:
     """PSD 레이어 목록과 내보내기에서 공통으로 사용하는 레이어 메타데이터입니다."""
