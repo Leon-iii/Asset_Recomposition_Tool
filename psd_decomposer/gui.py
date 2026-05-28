@@ -31,28 +31,37 @@ class ExportFormatState:
     format_value: str
     psd_enabled: bool
     ase_enabled: bool
-    warning_message: str
 
 
 def resolve_export_format_state(
     document_format: DocumentFormat | None,
-    psd_export_available: bool,
-    psd_export_message: str,
     current_format: str,
 ) -> ExportFormatState:
-    """문서 포맷과 Photoshop COM 상태를 기준으로 출력 형식 선택 가능 여부를 계산합니다."""
+    """문서 포맷을 기준으로 출력 형식 선택 가능 여부를 계산합니다."""
 
     if document_format is DocumentFormat.PSD:
-        if psd_export_available:
-            format_value = current_format if current_format in {"PNG", "PSD"} else "PNG"
-            return ExportFormatState(format_value, True, False, psd_export_message)
-        return ExportFormatState("PNG", False, False, psd_export_message)
+        # PSD 원본도 모든 출력 형식을 레스터화된 픽셀 레이어 기준으로 생성합니다.
+        format_value = current_format if current_format in {"PNG", "PSD", "ASE"} else "PNG"
+        return ExportFormatState(format_value, True, True)
 
     if document_format is DocumentFormat.ASEPRITE:
-        format_value = current_format if current_format in {"PNG", "ASE"} else "PNG"
-        return ExportFormatState(format_value, False, True, "PSD 내보내기는 PSD 원본 파일에서만 사용할 수 있습니다.")
+        # Aseprite 원본은 psd-tools writer 경로로 PSD 변환이 가능하므로 PSD를 허용합니다.
+        format_value = current_format if current_format in {"PNG", "PSD", "ASE"} else "PNG"
+        return ExportFormatState(format_value, True, True)
 
-    return ExportFormatState("PNG", False, False, "PSD 내보내기는 PSD 원본 파일을 먼저 로드한 뒤 사용할 수 있습니다.")
+    return ExportFormatState("PNG", False, False)
+
+
+def should_warn_psd_rasterization(document_format: DocumentFormat | None, export_format: str) -> bool:
+    """PSD 원본을 PSD로 내보낼 때 레스터화 경고가 필요한지 판단합니다."""
+
+    return document_format is DocumentFormat.PSD and export_format == "PSD"
+
+
+def should_warn_aseprite_multiframe(document_format: DocumentFormat | None, frame_count: int) -> bool:
+    """Aseprite 원본이 멀티 프레임이면 Frame 1만 처리한다는 경고가 필요한지 판단합니다."""
+
+    return document_format is DocumentFormat.ASEPRITE and frame_count >= 2
 
 
 def build_drop_detail_text(width: int, height: int, frame_count: int) -> str:
@@ -131,10 +140,6 @@ class PsdDecomposerApp:
         self.name_date_var = tk.BooleanVar(value=self.settings.include_date)
         self.overwrite_existing_var = tk.BooleanVar(value=self.settings.overwrite_existing)
         self.output_mode_var = tk.StringVar(value=self.settings.output_mode)
-        self.psd_export_available, self.psd_export_message = self._detect_psd_export_status()
-        self.psd_export_warning_message = self.psd_export_message
-        if self.settings.export_format == "PSD" and not self.psd_export_available:
-            self.settings.export_format = "PNG"
         self.format_var = tk.StringVar(value=self.settings.export_format)
         self.rescale_var = tk.IntVar(value=self.settings.rescale)
         self.layer_bounds_var = tk.StringVar(value="preserve" if self.settings.preserve_canvas else "crop")
@@ -349,15 +354,12 @@ class PsdDecomposerApp:
         # 출력 형식 라디오 버튼 배치
         export_format_label = ttk.Label(settings_frame, text="출력 형식")
         export_format_label.grid(row=6, column=0, sticky="w", pady=(14, 0))
-        Tooltip(export_format_label, "PSD 또는 PNG로 저장합니다.\nPSD 저장은 Windows Photoshop 자동화가 필요합니다.")
+        Tooltip(export_format_label, "PNG, PSD 또는 ASE로 저장합니다.\nPSD 출력은 모든 객체를 레스터화된 픽셀 레이어로 저장합니다.")
         format_frame = ttk.Frame(settings_frame)
         format_frame.grid(row=6, column=1, columnspan=2, sticky="w", padx=(8, 0), pady=(14, 0))
         # 출력 형식 선택지는 pack 간격으로 한 줄에 정렬합니다.
         self.psd_radio = ttk.Radiobutton(format_frame, text="PSD", variable=self.format_var, value="PSD")
         self.psd_radio.pack(side="left")
-        self.psd_radio.bind("<Button-1>", self._show_psd_unavailable_warning)
-        if not self.psd_export_available:
-            self.psd_radio.configure(state="disabled")
         ttk.Radiobutton(format_frame, text="PNG", variable=self.format_var, value="PNG").pack(side="left", padx=(16, 0))
         self.ase_radio = ttk.Radiobutton(format_frame, text="ASE", variable=self.format_var, value="ASE")
         self.ase_radio.pack(side="left", padx=(16, 0))
@@ -507,37 +509,6 @@ class PsdDecomposerApp:
 
     #endregion
 
-    #region PSD 내보내기 가용성
-
-    def _detect_psd_export_status(self) -> tuple[bool, str]:
-        """PSD 저장에 필요한 pywin32와 Photoshop COM 등록 상태를 확인합니다."""
-
-        # pywin32 설치 여부 확인
-        try:
-            import win32com.client  # noqa: F401
-        except ImportError:
-            return False, "PSD 저장에는 pywin32와 설치된 Photoshop이 필요합니다."
-
-        # Photoshop COM 등록 여부 확인
-        try:
-            import winreg
-
-            with winreg.OpenKey(winreg.HKEY_CLASSES_ROOT, r"Photoshop.Application\CLSID"):
-                return True, "PSD 저장 가능"
-        except OSError:
-            return False, "Photoshop COM 등록을 찾을 수 없습니다. Photoshop 설치 상태를 확인하세요."
-
-    def _show_psd_unavailable_warning(self, _event=None) -> str:
-        """비활성화된 PSD 라디오 버튼을 눌렀을 때 사유를 알려줍니다."""
-
-        if self.psd_radio.instate(["!disabled"]):
-            return ""
-
-        messagebox.showwarning("PSD 저장 불가", self.psd_export_warning_message)
-        return "break"
-
-    #endregion
-
     #region 파일 선택 및 로드
 
     def _browse_file(self) -> None:
@@ -614,6 +585,13 @@ class PsdDecomposerApp:
         self.progress_var.set(0)
         self._hide_progress_bar()
         self.status_var.set(f"{path.name}에서 레이어 {len(self.document.layers)}개를 불러왔습니다.")
+        if should_warn_aseprite_multiframe(self.document.format, self.document.frame_count):
+            # 현재 렌더링/변환 경로는 Aseprite의 첫 프레임만 사용하므로 멀티 프레임 입력에서는 명시적으로 경고합니다.
+            messagebox.showwarning(
+                "멀티 프레임 Aseprite 경고",
+                "현재 멀티 프레임 Aseprite는 지원하지 않습니다.\n"
+                "미리보기와 내보내기는 Frame 1만 사용합니다.",
+            )
 
     def _restore_drop_zone_after_failed_load(
         self,
@@ -881,20 +859,17 @@ class PsdDecomposerApp:
     #region 내보내기 작업
 
     def _update_export_format_state(self) -> None:
-        """로드된 문서 포맷과 Photoshop COM 상태에 따라 PSD 출력 선택 가능 여부를 갱신합니다."""
+        """로드된 문서 포맷에 따라 출력 선택 가능 여부를 갱신합니다."""
 
-        # 현재 문서 포맷과 Photoshop COM 상태로 출력 형식 상태 계산
+        # 현재 문서 포맷으로 출력 형식 상태 계산
         document_format = self.document.format if self.document is not None else None
         state = resolve_export_format_state(
             document_format,
-            self.psd_export_available,
-            self.psd_export_message,
             self.format_var.get(),
         )
 
-        # 계산된 출력 형식과 경고 메시지를 GUI 상태에 반영
+        # 계산된 출력 형식을 GUI 상태에 반영
         self.format_var.set(state.format_value)
-        self.psd_export_warning_message = state.warning_message
         self.ase_radio.configure(state="normal" if state.ase_enabled else "disabled")
         if state.psd_enabled:
             self.psd_radio.configure(state="normal")
@@ -939,6 +914,13 @@ class PsdDecomposerApp:
         # 선택 레이어와 내보내기 작업 생성
         selected_layer_ids = self._current_selected_layer_ids()
         job = self._create_export_job(selected_layer_ids)
+        if should_warn_psd_rasterization(self.document.format if self.document is not None else None, job.export_format):
+            # PSD 원본을 PSD로 다시 저장할 때는 모든 레이어가 픽셀 레이어로 변환됨을 명확히 알립니다.
+            messagebox.showwarning(
+                "PSD 레스터화 경고",
+                "PSD 출력은 모든 Photoshop 객체를 레스터화된 픽셀 레이어로 저장합니다.\n"
+                "텍스트, 벡터, 스마트 오브젝트, 레이어 스타일 같은 Photoshop 객체로서의 의미는 보존되지 않습니다.",
+            )
         # 설정 저장 및 진행 상태 초기화
         self._save_settings()
         self.progress_var.set(0)

@@ -8,5 +8,4 @@ dependencies = [
     "Pillow>=10.0",
     "psd-tools>=1.10.0",
     "tkinterdnd2>=0.4.2",
-    "pywin32>=306; platform_system == 'Windows'",
 ]

@@ -39,7 +39,7 @@ PSD의 한 아트 레이어를 GUI와 Exporter가 공통으로 이해할 수 있
 
 주요 메서드:
 
-- `LayerInfo.display_name`: `path`와 `name`을 `" / "`로 연결해 GUI 표시와 Photoshop 레이어 경로 비교에 사용한다.
+- `LayerInfo.display_name`: `path`와 `name`을 `" / "`로 연결해 GUI 표시와 출력 로그에 사용한다.
 
 ### `ExportJob`
 
@@ -86,10 +86,9 @@ GUI에서 선택한 모든 내보내기 옵션을 Exporter로 넘기기 위한 �
 3. `PsdDecomposerApp.__init__`
 4. `PsdDecomposerApp._set_window_icon`
 5. `AppSettings.load`
-6. `PsdDecomposerApp._detect_psd_export_status`
-7. `PsdDecomposerApp._build_ui`
-8. `PsdDecomposerApp._bind_drag_and_drop`
-9. `root.mainloop`
+6. `PsdDecomposerApp._build_ui`
+7. `PsdDecomposerApp._bind_drag_and_drop`
+8. `root.mainloop`
 
 ### 리소스 로드
 
@@ -350,47 +349,23 @@ GUI에서 이미 PSD를 로드했더라도 Exporter는 워커 스레드에서 �
 
 `Exporter._export_psd`가 담당한다.
 
-전제:
-
-- Windows
-- `pywin32`
-- Photoshop COM 등록
-
-GUI에서는 `PsdDecomposerApp._detect_psd_export_status`로 이 조건을 확인한다. 조건이 맞지 않으면 PSD 라디오 버튼은 비활성화되고, 클릭 시 `PsdDecomposerApp._show_psd_unavailable_warning`이 사유를 표시한다.
+PSD 출력은 Photoshop 자동화 없이 `psd_decomposer.psd_writer.write_layers_to_psd`로 새 PSD 파일을 생성한다. 모든 레이어는 `DocumentBackend.render_layer` 결과를 바탕으로 레스터화된 픽셀 레이어가 되며, 텍스트, 벡터, 스마트 오브젝트, 레이어 스타일 같은 Photoshop 객체 의미는 보존되지 않는다.
 
 PSD 내보내기 흐름:
 
-1. `import win32com.client`
-2. `win32com.client.Dispatch("Photoshop.Application")`
-3. `reserved_paths = set()`
-4. 선택 레이어 순회
-5. `document.get_layer_info(layer_id)`
-6. `build_base_name(job, layer)`
-7. `resolve_output_path(..., "psd", ...)`
-8. `shutil.copy2(job.source_path, output_path)`
-9. progress callback 호출
-10. `Exporter._keep_only_layer_in_photoshop(...)`
+1. `reserved_paths = set()`
+2. 선택 레이어 순회
+3. `document.get_layer_info(layer_id)`
+4. `build_base_name(job, layer)`
+5. `resolve_output_path(..., "psd", ...)`
+6. progress callback 호출
+7. `write_layers_to_psd(document, (layer_id,), output_path, ...)`
+8. `psd_tools.PSDImage.new`
+9. `PSDImage.create_pixel_layer`
+10. `PSDImage.save`
 11. `outputs.append(output_path)`
 
-### Photoshop JavaScript 흐름
-
-`Exporter._keep_only_layer_in_photoshop`은 복제된 PSD 파일을 Photoshop으로 열고 ExtendScript를 실행한다.
-
-흐름:
-
-1. `app.Open(str(path))`
-2. `layer_display_name`을 JSON 문자열로 변환
-3. Photoshop JavaScript 생성
-4. `visit(app.activeDocument, [])`
-5. 모든 레이어를 역순 순회
-6. `ArtLayer`의 현재 경로가 target path와 다르면 제거
-7. 그룹 레이어는 하위 레이어 처리 후 비었으면 제거
-8. `preserve_canvas=False`이면 `trim(TrimType.TRANSPARENT, ...)`
-9. `rescale`이 100%가 아니면 `resizeImage`
-10. `doc.Save`
-11. `doc.Close(2)`
-
-원본 PSD는 직접 수정하지 않는다. 항상 `shutil.copy2`로 복제한 파일을 Photoshop에서 수정한다.
+재구성 모드에서는 `Exporter._export_reconstructed_document_psd`가 선택 레이어 전체를 하나의 새 PSD에 넣는다. GUI는 PSD 원본을 PSD로 내보내기 시작할 때 `messagebox.showwarning`으로 레스터화 경고를 표시한다.
 
 ## 8. 파일명과 출력 경로 흐름
 
@@ -456,7 +431,7 @@ GUI 오류 처리:
 
 - 파일 로드 오류: `PsdDecomposerApp._load_file`에서 `messagebox.showerror`
 - 내보내기 오류: `PsdDecomposerApp._poll_worker_queue`에서 `messagebox.showerror`
-- PSD 저장 불가: `PsdDecomposerApp._show_psd_unavailable_warning`에서 `messagebox.showwarning`
+- PSD 원본을 PSD로 출력할 때 레스터화 경고: `PsdDecomposerApp._start_export`에서 `messagebox.showwarning`
 
 상태 표시:
 
@@ -498,10 +473,9 @@ GUI 오류 처리:
   -> PSD이면 Exporter._export_psd
        -> build_base_name
        -> resolve_output_path
-       -> shutil.copy2
-       -> Exporter._keep_only_layer_in_photoshop
-       -> Photoshop JavaScript
-       -> doc.Save
+       -> write_layers_to_psd
+       -> PSDImage.create_pixel_layer
+       -> PSDImage.save
   -> worker_queue
   -> PsdDecomposerApp._poll_worker_queue
   -> GUI 상태/진행률/완료 메시지 갱신

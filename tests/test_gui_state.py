@@ -3,90 +3,103 @@ from __future__ import annotations
 import unittest
 
 from psd_decomposer.document_backend import DocumentFormat
-from psd_decomposer.gui import build_drop_detail_text, resolve_export_format_state
+from psd_decomposer.gui import (
+    build_drop_detail_text,
+    resolve_export_format_state,
+    should_warn_aseprite_multiframe,
+    should_warn_psd_rasterization,
+)
 
 
 class GuiStateTests(unittest.TestCase):
     def test_no_loaded_document_disables_psd_and_forces_png(self) -> None:
         state = resolve_export_format_state(
             document_format=None,
-            psd_export_available=True,
-            psd_export_message="PSD 저장 가능",
             current_format="PSD",
         )
 
         self.assertEqual(state.format_value, "PNG")
         self.assertFalse(state.psd_enabled)
         self.assertFalse(state.ase_enabled)
-        self.assertIn("PSD 원본 파일을 먼저 로드", state.warning_message)
 
-    def test_psd_document_with_available_com_keeps_current_valid_format_and_enables_psd(self) -> None:
+    def test_psd_document_keeps_psd_format_and_enables_psd(self) -> None:
         state = resolve_export_format_state(
             document_format=DocumentFormat.PSD,
-            psd_export_available=True,
-            psd_export_message="PSD 저장 가능",
             current_format="PSD",
         )
 
         self.assertEqual(state.format_value, "PSD")
         self.assertTrue(state.psd_enabled)
-        self.assertFalse(state.ase_enabled)
-        self.assertEqual(state.warning_message, "PSD 저장 가능")
+        self.assertTrue(state.ase_enabled)
 
-    def test_psd_document_without_available_com_forces_png_and_uses_com_warning(self) -> None:
+    def test_psd_document_keeps_ase_format(self) -> None:
         state = resolve_export_format_state(
             document_format=DocumentFormat.PSD,
-            psd_export_available=False,
-            psd_export_message="Photoshop COM 등록을 찾을 수 없습니다.",
-            current_format="PSD",
+            current_format="ASE",
         )
 
-        self.assertEqual(state.format_value, "PNG")
-        self.assertFalse(state.psd_enabled)
-        self.assertFalse(state.ase_enabled)
-        self.assertEqual(state.warning_message, "Photoshop COM 등록을 찾을 수 없습니다.")
-
-    def test_aseprite_document_forces_png_even_when_com_is_available(self) -> None:
-        state = resolve_export_format_state(
-            document_format=DocumentFormat.ASEPRITE,
-            psd_export_available=True,
-            psd_export_message="PSD 저장 가능",
-            current_format="PSD",
-        )
-
-        self.assertEqual(state.format_value, "PNG")
-        self.assertFalse(state.psd_enabled)
+        self.assertEqual(state.format_value, "ASE")
+        self.assertTrue(state.psd_enabled)
         self.assertTrue(state.ase_enabled)
-        self.assertIn("PSD 원본 파일에서만", state.warning_message)
 
     def test_psd_document_with_invalid_current_format_falls_back_to_png(self) -> None:
         state = resolve_export_format_state(
             document_format=DocumentFormat.PSD,
-            psd_export_available=True,
-            psd_export_message="PSD 저장 가능",
             current_format="TIFF",
         )
 
         self.assertEqual(state.format_value, "PNG")
         self.assertTrue(state.psd_enabled)
-        self.assertFalse(state.ase_enabled)
+        self.assertTrue(state.ase_enabled)
+
+    def test_aseprite_document_keeps_psd_format_and_enables_psd(self) -> None:
+        state = resolve_export_format_state(
+            document_format=DocumentFormat.ASEPRITE,
+            current_format="PSD",
+        )
+
+        self.assertEqual(state.format_value, "PSD")
+        self.assertTrue(state.psd_enabled)
+        self.assertTrue(state.ase_enabled)
 
     def test_aseprite_document_keeps_ase_format(self) -> None:
         state = resolve_export_format_state(
             document_format=DocumentFormat.ASEPRITE,
-            psd_export_available=True,
-            psd_export_message="PSD 저장 가능",
             current_format="ASE",
         )
 
         self.assertEqual(state.format_value, "ASE")
-        self.assertFalse(state.psd_enabled)
+        self.assertTrue(state.psd_enabled)
         self.assertTrue(state.ase_enabled)
+
+    def test_psd_rasterization_warning_only_applies_to_psd_source_and_psd_output(self) -> None:
+        self.assertTrue(should_warn_psd_rasterization(DocumentFormat.PSD, "PSD"))
+        self.assertFalse(should_warn_psd_rasterization(DocumentFormat.PSD, "PNG"))
+        self.assertFalse(should_warn_psd_rasterization(DocumentFormat.PSD, "ASE"))
+        self.assertFalse(should_warn_psd_rasterization(DocumentFormat.ASEPRITE, "PSD"))
+        self.assertFalse(should_warn_psd_rasterization(None, "PSD"))
+
+    def test_aseprite_multiframe_warning_only_applies_to_aseprite_with_multiple_frames(self) -> None:
+        self.assertTrue(should_warn_aseprite_multiframe(DocumentFormat.ASEPRITE, 2))
+        self.assertTrue(should_warn_aseprite_multiframe(DocumentFormat.ASEPRITE, 3))
+        self.assertFalse(should_warn_aseprite_multiframe(DocumentFormat.ASEPRITE, 1))
+        self.assertFalse(should_warn_aseprite_multiframe(DocumentFormat.PSD, 2))
+        self.assertFalse(should_warn_aseprite_multiframe(None, 2))
 
     def test_drop_detail_text_includes_canvas_size_and_frame_count(self) -> None:
         detail_text = build_drop_detail_text(24, 16, 3)
 
         self.assertEqual(detail_text, "캔버스 크기: 24x16 px\n총 프레임 수: 3")
+
+    def test_aseprite_document_with_invalid_current_format_falls_back_to_png(self) -> None:
+        state = resolve_export_format_state(
+            document_format=DocumentFormat.ASEPRITE,
+            current_format="TIFF",
+        )
+
+        self.assertEqual(state.format_value, "PNG")
+        self.assertTrue(state.psd_enabled)
+        self.assertTrue(state.ase_enabled)
 
 
 if __name__ == "__main__":

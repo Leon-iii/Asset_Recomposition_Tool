@@ -131,10 +131,11 @@ class PsdDocument:
     def render_preview(self):
         """드롭 존에 표시할 PSD 전체 미리보기 이미지를 렌더링합니다."""
 
-        image = self._psd.composite()
+        # PSD 내부 preview 이미지는 투명 영역이 배경색으로 합성되어 있을 수 있으므로 투명 캔버스에 다시 합성합니다.
+        image = self._psd.composite(ignore_preview=True, color=0.0, alpha=0.0)
         if image is None:
             raise PsdBackendError("PSD 미리보기 이미지를 생성할 수 없습니다.")
-        return image
+        return image.convert("RGBA")
 
     def render_layer_thumbnail(self, layer_id: str, max_size: tuple[int, int] = (48, 48)):
         """레이어 선택 테이블에 사용할 작은 썸네일을 생성합니다."""

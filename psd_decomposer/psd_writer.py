@@ -1,0 +1,80 @@
+from __future__ import annotations
+
+from pathlib import Path
+
+from PIL import Image
+
+from .document_backend import DocumentBackend, DocumentBackendError
+
+
+def write_layers_to_psd(
+    document: DocumentBackend,
+    layer_ids: tuple[str, ...],
+    output_path: Path,
+    *,
+    preserve_canvas: bool,
+    rescale: int = 100,
+) -> Path:
+    """문서 백엔드가 렌더링한 1프레임 레이어 이미지를 새 PSD 파일로 저장합니다."""
+
+    try:
+        from psd_tools import PSDImage
+    except ImportError as exc:
+        raise DocumentBackendError("PSD 변환에는 psd-tools가 필요합니다.") from exc
+
+    # 현재 Aseprite 백엔드는 frame_index=0만 렌더링하므로 멀티 프레임 입력도 첫 프레임만 PSD로 옮깁니다.
+    scale = max(1, rescale) / 100
+    canvas_size = _scaled_size(_psd_canvas_size(document, layer_ids, preserve_canvas), scale)
+    psd = PSDImage.new("RGBA", canvas_size, (0, 0, 0, 0))
+
+    # 문서 스택 순서를 보존하면서 선택된 레이어만 PSD 픽셀 레이어로 추가합니다.
+    selected = set(layer_ids)
+    for layer in document.layers:
+        if layer.id not in selected:
+            continue
+        image, left, top = _layer_image_and_offset(document, layer.id, preserve_canvas)
+        image = _scaled_image(image, scale)
+        left = round(left * scale)
+        top = round(top * scale)
+        psd.create_pixel_layer(image, name=layer.name, top=top, left=left)
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    psd.save(output_path)
+    return output_path
+
+
+def _psd_canvas_size(document: DocumentBackend, layer_ids: tuple[str, ...], preserve_canvas: bool) -> tuple[int, int]:
+    """캔버스 보존 여부에 맞춰 새 PSD 문서의 크기를 계산합니다."""
+
+    if preserve_canvas:
+        return document.width, document.height
+
+    # crop 출력에서는 선택 레이어 이미지의 실제 크기를 새 PSD 캔버스로 사용합니다.
+    first_layer_id = layer_ids[0]
+    image = document.render_layer(first_layer_id)
+    return max(1, image.width), max(1, image.height)
+
+
+def _layer_image_and_offset(document: DocumentBackend, layer_id: str, preserve_canvas: bool) -> tuple[Image.Image, int, int]:
+    """PSD 픽셀 레이어에 넣을 이미지와 좌표를 준비합니다."""
+
+    layer = document.get_layer_info(layer_id)
+    image = document.render_layer(layer_id).convert("RGBA")
+    if preserve_canvas:
+        return image, layer.left, layer.top
+    return image, 0, 0
+
+
+def _scaled_size(size: tuple[int, int], scale: float) -> tuple[int, int]:
+    """확대 비율을 적용한 PSD 캔버스 크기를 계산합니다."""
+
+    width, height = size
+    return max(1, round(width * scale)), max(1, round(height * scale))
+
+
+def _scaled_image(image: Image.Image, scale: float) -> Image.Image:
+    """확대 비율이 100%가 아닐 때 레이어 이미지를 리샘플링합니다."""
+
+    if scale == 1:
+        return image
+    return image.resize(_scaled_size(image.size, scale), Image.Resampling.LANCZOS)

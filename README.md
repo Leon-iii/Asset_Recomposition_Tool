@@ -12,7 +12,7 @@ python -m venv .venv
 Optional features:
 
 - Drag and drop support uses `tkinterdnd2`.
-- PSD layer-preserving export on Windows uses Photoshop via COM automation and requires `pywin32` plus an installed Photoshop.
+- PSD export is generated from rasterized pixel layers. Photoshop objects such as text, vector shapes, smart objects, and layer effects are not preserved as editable Photoshop objects.
 
 The output settings include a layer bounds mode:
 

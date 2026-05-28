@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import json
-import shutil
 from pathlib import Path
 from typing import Callable
 
@@ -9,10 +7,12 @@ from PIL import Image
 
 from .aseprite_codec import keep_layers, rename_layer
 from .aseprite_codec.errors import AseEditError
+from .ase_writer import write_layers_to_aseprite
 from .document_backend import DocumentBackend, DocumentFormat, load_document
 from .models import ExportJob
 from .naming import build_base_name, build_output_directory, build_reconstructed_base_name, resolve_output_path
 from .psd_backend import PsdBackendError
+from .psd_writer import write_layers_to_psd
 
 
 ProgressCallback = Callable[[str], None]
@@ -44,14 +44,18 @@ class Exporter:
                 return self._export_reconstructed_png(document, job, output_directory)
             return self._export_png(document, job, output_directory)
         if job.export_format == "PSD":
-            if document.format is not DocumentFormat.PSD:
-                raise PsdBackendError("PSD 내보내기는 PSD 원본 파일에서만 사용할 수 있습니다.")
+            if document.format not in {DocumentFormat.PSD, DocumentFormat.ASEPRITE}:
+                raise PsdBackendError("PSD 내보내기는 PSD 또는 Aseprite 원본 파일에서만 사용할 수 있습니다.")
             if job.output_mode == "reconstruct":
-                return self._export_reconstructed_psd(document, job, output_directory)
-            return self._export_psd(document, job, output_directory)
+                return self._export_reconstructed_document_psd(document, job, output_directory)
+            return self._export_document_psd(document, job, output_directory)
         if job.export_format == "ASE":
+            if job.output_mode == "reconstruct" and document.format is DocumentFormat.PSD:
+                return self._export_reconstructed_document_aseprite(document, job, output_directory)
+            if document.format is DocumentFormat.PSD:
+                return self._export_document_aseprite(document, job, output_directory)
             if document.format is not DocumentFormat.ASEPRITE:
-                raise PsdBackendError("ASE 내보내기는 Aseprite 원본 파일에서만 사용할 수 있습니다.")
+                raise PsdBackendError("ASE 내보내기는 PSD 또는 Aseprite 원본 파일에서만 사용할 수 있습니다.")
             return self._export_aseprite(document, job, output_directory)
         raise PsdBackendError(f"지원하지 않는 출력 형식입니다: {job.export_format}")
 
@@ -147,17 +151,14 @@ class Exporter:
         return canvas
 
     def _export_psd(self, document: DocumentBackend, job: ExportJob, output_directory: Path) -> list[Path]:
-        """Photoshop COM 자동화로 원본 PSD를 복제한 뒤 선택 레이어만 남겨 저장합니다."""
+        """기존 호출 호환을 위해 PSD 레스터 변환 경로로 위임합니다."""
 
-        try:
-            import win32com.client
-        except ImportError as exc:
-            raise PsdBackendError(
-                "PSD 내보내기는 Windows의 pywin32와 설치된 Photoshop이 필요합니다. "
-                "PNG 내보내기는 Photoshop 없이 사용할 수 있습니다."
-            ) from exc
+        # PSD 원본도 Photoshop 객체를 보존하지 않고 렌더링된 픽셀 레이어 PSD로 저장합니다.
+        return self._export_document_psd(document, job, output_directory)
 
-        app = win32com.client.Dispatch("Photoshop.Application")
+    def _export_document_psd(self, document: DocumentBackend, job: ExportJob, output_directory: Path) -> list[Path]:
+        """문서 백엔드의 렌더링 결과를 새 레스터 PSD 파일들로 변환해 저장합니다."""
+
         outputs: list[Path] = []
         reserved_paths: set[Path] = set()
 
@@ -171,24 +172,28 @@ class Exporter:
                 job.overwrite_existing,
                 reserved_paths,
             )
-            # Photoshop 작업 전에 원본을 복사해 두어 원본 PSD는 절대 수정하지 않습니다.
-            shutil.copy2(job.source_path, output_path)
-            self.progress(f"PSD 준비 중: {layer.display_name}")
-            self._keep_only_layer_in_photoshop(app, output_path, layer.display_name, job.rescale, job.preserve_canvas)
+            self.progress(f"PSD 변환 중: {layer.display_name}")
+            write_layers_to_psd(
+                document,
+                (layer_id,),
+                output_path,
+                preserve_canvas=job.preserve_canvas,
+                rescale=job.rescale,
+            )
             outputs.append(output_path)
 
         return outputs
 
     def _export_reconstructed_psd(self, document: DocumentBackend, job: ExportJob, output_directory: Path) -> list[Path]:
-        """원본 PSD를 복제한 뒤 선택한 레이어들만 남긴 단일 PSD로 저장합니다."""
+        """기존 호출 호환을 위해 단일 PSD 레스터 변환 경로로 위임합니다."""
 
-        try:
-            import win32com.client
-        except ImportError as exc:
-            raise PsdBackendError(
-                "PSD 내보내기는 Windows의 pywin32와 설치된 Photoshop이 필요합니다. "
-                "PNG 내보내기는 Photoshop 없이 사용할 수 있습니다."
-            ) from exc
+        # PSD 원본도 Photoshop 객체를 보존하지 않고 렌더링된 픽셀 레이어 PSD로 저장합니다.
+        return self._export_reconstructed_document_psd(document, job, output_directory)
+
+    def _export_reconstructed_document_psd(
+        self, document: DocumentBackend, job: ExportJob, output_directory: Path
+    ) -> list[Path]:
+        """문서 백엔드의 선택 레이어를 하나의 새 레스터 PSD로 저장합니다."""
 
         output_path = resolve_output_path(
             output_directory,
@@ -197,78 +202,65 @@ class Exporter:
             job.overwrite_existing,
             set(),
         )
-        shutil.copy2(job.source_path, output_path)
-        layer_names = [document.get_layer_info(layer_id).display_name for layer_id in job.selected_layer_ids]
-        self.progress(f"PSD 재구성 중: {output_path.name}")
-        app = win32com.client.Dispatch("Photoshop.Application")
-        self._keep_layers_in_photoshop(app, output_path, layer_names, job.rescale, preserve_canvas=True)
+        self.progress(f"PSD 재구성 변환 중: {output_path.name}")
+        write_layers_to_psd(
+            document,
+            job.selected_layer_ids,
+            output_path,
+            preserve_canvas=True,
+            rescale=job.rescale,
+        )
         return [output_path]
 
-    @staticmethod
-    def _keep_only_layer_in_photoshop(
-        app, path: Path, layer_display_name: str, rescale: int, preserve_canvas: bool
-    ) -> None:
-        """Photoshop JavaScript를 실행해 대상 레이어 외의 레이어를 제거하고 저장합니다."""
+    def _export_document_aseprite(self, document: DocumentBackend, job: ExportJob, output_directory: Path) -> list[Path]:
+        """PSD 같은 비 Aseprite 문서 백엔드를 1프레임 Aseprite 파일들로 변환해 저장합니다."""
 
-        Exporter._keep_layers_in_photoshop(app, path, [layer_display_name], rescale, preserve_canvas)
+        outputs: list[Path] = []
+        reserved_paths: set[Path] = set()
 
-    @staticmethod
-    def _keep_layers_in_photoshop(
-        app, path: Path, layer_display_names: list[str], rescale: int, preserve_canvas: bool
-    ) -> None:
-        """Photoshop JavaScript를 실행해 대상 레이어 목록 외의 레이어를 제거하고 저장합니다."""
+        for layer_id in job.selected_layer_ids:
+            layer = document.get_layer_info(layer_id)
+            base_name = build_base_name(job, layer)
+            output_path = resolve_output_path(
+                output_directory,
+                base_name,
+                "aseprite",
+                job.overwrite_existing,
+                reserved_paths,
+            )
+            self.progress(f"ASE 변환 중: {layer.display_name}")
+            write_layers_to_aseprite(
+                document,
+                (layer_id,),
+                output_path,
+                preserve_canvas=job.preserve_canvas,
+                rescale=job.rescale,
+            )
+            outputs.append(output_path)
 
-        doc = app.Open(str(path))
-        try:
-            target_paths_json = json.dumps(layer_display_names)
-            scale = rescale / 100
-            # ExtendScript는 그룹을 재귀 순회하며 경로가 선택 목록에 없는 ArtLayer를 제거합니다.
-            script = f"""
-var targetPaths = {target_paths_json};
+        return outputs
 
-function isTarget(path) {{
-    for (var j = 0; j < targetPaths.length; j++) {{
-        if (targetPaths[j] == path) {{
-            return true;
-        }}
-    }}
-    return false;
-}}
+    def _export_reconstructed_document_aseprite(
+        self, document: DocumentBackend, job: ExportJob, output_directory: Path
+    ) -> list[Path]:
+        """PSD 같은 비 Aseprite 문서 백엔드를 선택 레이어만 가진 단일 Aseprite 파일로 저장합니다."""
 
-function visit(container, ancestors) {{
-    for (var i = container.layers.length - 1; i >= 0; i--) {{
-        var layer = container.layers[i];
-        var current = ancestors.concat([layer.name]);
-        if (layer.typename == "ArtLayer") {{
-            if (!isTarget(current.join(" / "))) {{
-                layer.remove();
-            }}
-        }} else {{
-            visit(layer, current);
-            if (layer.layers.length == 0) {{
-                layer.remove();
-            }}
-        }}
-    }}
-}}
-
-visit(app.activeDocument, []);
-if (!{json.dumps(preserve_canvas)}) {{
-    app.activeDocument.trim(TrimType.TRANSPARENT, true, true, true, true);
-}}
-if ({scale} != 1) {{
-    app.activeDocument.resizeImage(
-        UnitValue(app.activeDocument.width.value * {scale}, "px"),
-        UnitValue(app.activeDocument.height.value * {scale}, "px"),
-        null,
-        ResampleMethod.BICUBIC
-    );
-}}
-"""
-            app.DoJavaScript(script)
-            doc.Save()
-        finally:
-            doc.Close(2)
+        output_path = resolve_output_path(
+            output_directory,
+            self._reconstructed_base_name(document, job),
+            "aseprite",
+            job.overwrite_existing,
+            set(),
+        )
+        self.progress(f"ASE 재구성 변환 중: {output_path.name}")
+        write_layers_to_aseprite(
+            document,
+            job.selected_layer_ids,
+            output_path,
+            preserve_canvas=True,
+            rescale=job.rescale,
+        )
+        return [output_path]
 
     def _export_aseprite(self, document: DocumentBackend, job: ExportJob, output_directory: Path) -> list[Path]:
         """선택 레이어 상태를 반영한 Aseprite 문서를 .aseprite 파일로 저장합니다."""
