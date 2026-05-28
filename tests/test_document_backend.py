@@ -5,7 +5,6 @@ from pathlib import Path
 from unittest.mock import patch
 
 from psd_decomposer.document_backend import (
-    DocumentBackendError,
     DocumentFormat,
     is_aseprite_document,
     is_supported_document,
@@ -21,9 +20,12 @@ class DocumentBackendTests(unittest.TestCase):
         document_class.assert_called_once_with(Path("sample.psd"))
         self.assertIs(document, document_class.return_value)
 
-    def test_aseprite_extension_is_recognized_but_not_implemented_yet(self) -> None:
-        with self.assertRaises(DocumentBackendError):
-            load_document(Path("sample.aseprite"))
+    def test_aseprite_extension_routes_to_aseprite_document(self) -> None:
+        with patch("psd_decomposer.ase_backend.AsepriteDocument", autospec=True) as document_class:
+            document = load_document(Path("sample.aseprite"))
+
+        document_class.assert_called_once_with(Path("sample.aseprite"))
+        self.assertIs(document, document_class.return_value)
 
     def test_supported_document_extension_helpers(self) -> None:
         self.assertTrue(is_supported_document(Path("sample.psd")))

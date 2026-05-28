@@ -1,0 +1,162 @@
+# Aseprite Decoder Test Strategy
+
+This document lists the core testing strategies for the `.ase` / `.aseprite` decoder.
+Keep this file short and stable. Detailed implementation plans belong in the codec plan document.
+
+## 1. Test the binary layer first
+
+The decoder depends on exact binary parsing.
+Always keep focused tests for:
+
+- little-endian integer readers
+- signed vs unsigned integer readers
+- length-prefixed UTF-8 strings
+- EOF and truncated input handling
+- chunk size calculation
+
+These tests should fail immediately if endian handling, string parsing, or stream offset logic is changed incorrectly.
+
+## 2. Use fixture files with explicit manifests
+
+Each important `.aseprite` fixture should have a matching JSON manifest.
+
+Example:
+
+- `single_layer_single_frame_rgba.aseprite`
+- `single_layer_single_frame_rgba.json`
+
+The manifest should record expected values such as:
+
+- canvas width and height
+- color depth
+- frame count
+- frame durations
+- layer names, indices, visibility, and types
+- tag names and frame ranges
+- cel layer index, position, size, and cel type
+- palette entry count and key RGBA values, when relevant
+
+Do not rely on visual inspection alone.
+
+## 3. Keep format invariant tests
+
+Add tests that apply to every valid fixture.
+
+Required invariants:
+
+- header frame count equals parsed frame count
+- color depth is one of 8, 16, or 32
+- every cel layer index points to an existing layer
+- cel opacity is between 0 and 255
+- raw and compressed image cels have positive width and height
+- decoded pixel byte length equals width * height * bytes_per_pixel
+- linked cels reference a valid frame
+- unknown chunks are preserved instead of dropped
+
+These tests protect the decoder from partial or careless changes.
+
+## 4. Test invalid and truncated files
+
+The decoder must fail loudly on invalid binary data.
+
+Required invalid cases:
+
+- empty file
+- truncated file header
+- wrong file magic number
+- wrong frame magic number
+- chunk size smaller than 6
+- truncated chunk payload
+- invalid zlib compressed cel payload
+- decompressed pixel data length mismatch
+
+Invalid files should raise the project’s Aseprite format error type, not generic crashes where possible.
+
+## 5. Preserve unknown chunks
+
+Unsupported chunks are not errors by themselves.
+They must be stored as raw chunks.
+
+This is required because the future encoder/writer may need round-trip preservation.
+Never discard unknown chunk payloads unless the user explicitly requests destructive cleanup behavior.
+
+## 6. Add regression tests for every supported chunk
+
+When support is added for a chunk type, add at least one fixture or binary unit test for it.
+
+Initial required chunk coverage:
+
+- File Header
+- Frame Header
+- Layer Chunk, 0x2004
+- Cel Chunk, 0x2005
+- Tags Chunk, 0x2018
+- Palette Chunk, 0x2019
+- Unknown Chunk preservation
+
+Future chunk support must follow the same rule.
+
+## 7. Separate fast tests from external tests
+
+Fast tests should run with:
+
+```bash
+pytest tests
+```
+
+External tests may require Aseprite CLI or other installed tools.
+Mark those tests separately, for example:
+
+```bash
+pytest tests -m "not external"
+```
+
+External tests are useful for validating writer output later, but they must not be required for the basic decoder test suite.
+
+## 8. Prefer explicit test names
+
+Test names should document format rules.
+
+Good examples:
+
+- `test_string_is_word_length_prefixed_utf8_not_null_terminated`
+- `test_chunk_size_includes_size_and_type_fields`
+- `test_layer_index_is_layer_chunk_order`
+- `test_compressed_cel_uses_zlib_and_exact_pixel_count`
+- `test_unknown_chunks_are_preserved_not_dropped`
+
+Codex should be able to infer the intended behavior from the test name.
+
+## 9. Do not modify decoder behavior without tests
+
+Before changing decoder behavior:
+
+1. Add or update a failing test that describes the intended behavior.
+2. Implement the change.
+3. Run the relevant tests.
+4. Confirm existing fixtures still pass.
+
+No parser behavior change should be accepted without a corresponding test update.
+
+## 10. Recommended initial test files
+
+Recommended minimal test files:
+
+- `test_ase_binary.py`
+- `test_ase_header.py`
+- `test_ase_frame_chunks.py`
+- `test_ase_layers.py`
+- `test_ase_cels.py`
+- `test_ase_tags.py`
+- `test_ase_palette.py`
+- `test_ase_invalid_files.py`
+- `test_ase_regression.py`
+
+Recommended fixture categories:
+
+- single-layer single-frame RGBA
+- multi-frame RGBA with tags
+- multi-layer RGBA
+- linked cel RGBA
+- indexed palette file
+- file containing unsupported chunks for raw preservation testing

@@ -1,0 +1,62 @@
+{
+  "file": "layer_tag_palette_cel.aseprite",
+  "canvas": {
+    "width": 4,
+    "height": 4
+  },
+  "color_depth": 32,
+  "frame_count": 1,
+  "frame_durations": [75],
+  "chunk_types_by_frame": [
+    [8196, 8197, 8216, 8217]
+  ],
+  "layers": [
+    {
+      "index": 0,
+      "name": "Sprite",
+      "visible": true,
+      "layer_type": 0,
+      "child_level": 0,
+      "opacity": 255
+    }
+  ],
+  "cels": [
+    {
+      "frame": 0,
+      "layer_index": 0,
+      "x": 1,
+      "y": 2,
+      "width": 1,
+      "height": 1,
+      "cel_type": 0,
+      "opacity": 255,
+      "pixels_hex": "ff0000ff"
+    }
+  ],
+  "tags": [
+    {
+      "name": "Idle",
+      "from_frame": 0,
+      "to_frame": 0,
+      "loop_direction": 0,
+      "repeat": 0
+    }
+  ],
+  "palettes": [
+    {
+      "palette_size": 1,
+      "first_index": 0,
+      "last_index": 0,
+      "entries": [
+        {
+          "index": 0,
+          "r": 255,
+          "g": 0,
+          "b": 0,
+          "a": 255,
+          "name": "red"
+        }
+      ]
+    }
+  ]
+}

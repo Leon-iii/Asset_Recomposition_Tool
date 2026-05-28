@@ -44,6 +44,8 @@ class PsdDocument:
         self.path = path
         self._psd = PSDImage.open(path)
         self.width, self.height = self._get_canvas_size()
+        # PSD 입력은 정적 문서로 다루므로 드롭 존에는 1프레임으로 표시합니다.
+        self.frame_count = 1
         self.layers = tuple(self._collect_layers())
         self._layers_by_id = {layer.id: layer for layer in self.layers}
 

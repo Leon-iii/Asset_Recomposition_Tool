@@ -17,9 +17,11 @@ class AppSettings:
     wrap_with_folder      : bool = True
     include_original_name : bool = True
     include_layer_name    : bool = True
+    include_layer_count   : bool = True
     include_date          : bool = False
     overwrite_existing    : bool = False
     export_format         : str = "PNG"
+    output_mode           : str = "decompose"
     rescale               : int = 100
     preserve_canvas       : bool = True
 
@@ -38,8 +40,10 @@ class AppSettings:
         # 이전 버전의 설정 파일에 없는 필드는 기본값을 유지하고, 알 수 없는 필드는 무시합니다.
         defaults.update({key: value for key, value in data.items() if key in defaults})
         settings = cls(**defaults)
-        if settings.export_format not in {"PNG", "PSD"}:
+        if settings.export_format not in {"PNG", "PSD", "ASE"}:
             settings.export_format = "PNG"
+        if settings.output_mode not in {"decompose", "reconstruct"}:
+            settings.output_mode = "decompose"
         if settings.rescale not in {100, 200, 400, 800}:
             settings.rescale = 100
         return settings

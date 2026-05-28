@@ -1,0 +1,31 @@
+{
+  "file": "header_frame_unknown_chunks.aseprite",
+  "canvas": {
+    "width": 16,
+    "height": 8
+  },
+  "color_depth": 32,
+  "frame_count": 2,
+  "frame_durations": [90, 120],
+  "chunk_types_by_frame": [
+    [8192],
+    [8193, 8194]
+  ],
+  "unknown_chunks": [
+    {
+      "frame": 0,
+      "chunk_type": 8192,
+      "payload_hex": "616c706861"
+    },
+    {
+      "frame": 1,
+      "chunk_type": 8193,
+      "payload_hex": "62657461"
+    },
+    {
+      "frame": 1,
+      "chunk_type": 8194,
+      "payload_hex": "67616d6d61"
+    }
+  ]
+}

@@ -39,3 +39,6 @@ class ExportJob:
     rescale: int
     preserve_canvas: bool
     selected_layer_ids: tuple[str, ...]
+    output_mode: str = "decompose"
+    include_layer_count: bool = False
+    layer_names: dict[str, str] | None = None

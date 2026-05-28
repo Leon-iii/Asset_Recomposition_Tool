@@ -9,6 +9,7 @@ from psd_decomposer.models import ExportJob, LayerInfo
 from psd_decomposer.naming import (
     build_base_name,
     build_output_directory,
+    build_reconstructed_base_name,
     resolve_output_path,
     sanitize_filename_part,
     unique_output_path,
@@ -44,6 +45,26 @@ class NamingTests(unittest.TestCase):
 
     def test_wrap_directory_uses_source_name(self) -> None:
         self.assertEqual(build_output_directory(self.make_job()), Path("C:/out/City1_decomposed"))
+
+    def test_reconstructed_base_name_uses_top_layer_and_active_count(self) -> None:
+        job = self.make_job(include_original_name=False, include_layer_name=True, include_layer_count=True, include_date=False)
+
+        self.assertEqual(build_reconstructed_base_name(job, "Group", 3, date(2026, 5, 7)), "Group_3_Layers")
+
+    def test_reconstructed_base_name_sanitizes_top_layer_name(self) -> None:
+        job = self.make_job(include_original_name=False, include_layer_name=True, include_layer_count=True, include_date=False)
+
+        self.assertEqual(build_reconstructed_base_name(job, "bad:name*", 2, date(2026, 5, 7)), "bad_name__2_Layers")
+
+    def test_reconstructed_base_name_uses_enabled_file_name_parts(self) -> None:
+        job = self.make_job(include_original_name=True, include_layer_name=True, include_layer_count=True, include_date=True)
+
+        self.assertEqual(build_reconstructed_base_name(job, "Group", 3, date(2026, 5, 7)), "City1_Group_3_Layers_260507")
+
+    def test_reconstructed_base_name_falls_back_to_top_layer_name(self) -> None:
+        job = self.make_job(include_original_name=False, include_layer_name=False, include_layer_count=False, include_date=False)
+
+        self.assertEqual(build_reconstructed_base_name(job, "Group", 3, date(2026, 5, 7)), "Group")
 
     def test_sanitize_filename_part_removes_invalid_characters(self) -> None:
         self.assertEqual(sanitize_filename_part('bad:name*'), "bad_name_")

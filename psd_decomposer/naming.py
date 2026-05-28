@@ -44,6 +44,30 @@ def build_base_name(job: ExportJob, layer: LayerInfo, today: date | None = None)
     return "_".join(sanitize_filename_part(part) for part in parts)
 
 
+def build_reconstructed_base_name(
+    job: ExportJob,
+    top_layer_name: str,
+    active_layer_count: int,
+    today: date | None = None,
+) -> str:
+    """재구성 모드의 파일명 옵션을 최상위 레이어명과 활성 레이어 수 기준으로 조합합니다."""
+
+    today = today or date.today()
+    parts: list[str] = []
+    if job.include_original_name:
+        parts.append(job.source_path.stem)
+    if job.include_layer_name:
+        parts.append(top_layer_name)
+    if job.include_layer_count:
+        parts.append(f"{max(0, active_layer_count)}_Layers")
+    if job.include_date:
+        parts.append(today.strftime("%y%m%d"))
+
+    if not parts:
+        parts.append(top_layer_name)
+    return "_".join(sanitize_filename_part(part) for part in parts)
+
+
 def unique_output_path(directory: Path, base_name: str, extension: str) -> Path:
     """기존 파일과 충돌하지 않는 파일 경로를 순번 suffix로 찾습니다."""
 

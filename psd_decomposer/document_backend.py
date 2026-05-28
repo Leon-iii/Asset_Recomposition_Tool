@@ -31,6 +31,7 @@ class DocumentBackend(Protocol):
     format: DocumentFormat
     width: int
     height: int
+    frame_count: int
     layers: tuple[LayerInfo, ...]
 
     def get_layer_info(self, layer_id: str) -> LayerInfo: ...
@@ -51,7 +52,9 @@ def load_document(path: Path) -> DocumentBackend:
 
         return PsdDocument(path)
     if suffix in ASEPRITE_EXTENSIONS:
-        raise DocumentBackendError(".ase/.aseprite 파일은 입력 확장자만 준비되었고, 파서는 아직 구현되지 않았습니다.")
+        from .ase_backend import AsepriteDocument
+
+        return AsepriteDocument(path)
 
     supported = ", ".join(sorted(SUPPORTED_EXTENSIONS))
     raise DocumentBackendError(f"지원하지 않는 확장자입니다. 지원 형식: {supported}")
