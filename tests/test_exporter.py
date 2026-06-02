@@ -115,6 +115,41 @@ class ExporterImageTests(unittest.TestCase):
         self.assertEqual(saved_images[0].size, (1, 1))
         self.assertEqual(saved_images[0].convert("RGBA").getpixel((0, 0)), (255, 0, 0, 255))
 
+    def test_export_png_uses_edited_psd_layer_name_for_output_file(self) -> None:
+        """PSD 레이어명 편집값이 PNG 출력 파일명에 반영되는지 확인합니다."""
+
+        output_dir = WORKSPACE_DIR / f"test-png-renamed-output-{uuid4().hex}"
+        layer = LayerInfo(id="0", name="box", path=(), visible=True, width=2, height=2, left=0, top=0)
+        document = FakeDocument(layer, Image.new("RGBA", (2, 2), (255, 0, 0, 255)))
+        job = ExportJob(
+            source_path=Path("source.psd"),
+            output_directory=output_dir,
+            wrap_with_folder=False,
+            include_original_name=False,
+            include_layer_name=True,
+            include_date=False,
+            overwrite_existing=False,
+            export_format="PNG",
+            rescale=100,
+            preserve_canvas=False,
+            selected_layer_ids=("0",),
+            layer_names={"0": "Hero"},
+        )
+
+        def capture_save(_image: Image.Image, _path: Path) -> None:
+            return None
+
+        try:
+            with (
+                patch("psd_decomposer.exporter.load_document", return_value=document),
+                patch.object(Image.Image, "save", autospec=True, side_effect=capture_save),
+            ):
+                outputs = Exporter().export(job)
+        finally:
+            _remove_output_dir(output_dir)
+
+        self.assertEqual(outputs, [output_dir / "Hero.png"])
+
     def test_reconstruct_png_exports_selected_layers_as_one_file(self) -> None:
         output_dir = WORKSPACE_DIR / f"test-reconstruct-output-{uuid4().hex}"
         top = LayerInfo(id="0", name="top", path=("Group",), visible=True, width=2, height=2, left=0, top=0)
@@ -198,6 +233,48 @@ class ExporterImageTests(unittest.TestCase):
 
         self.assertEqual(outputs, [output_dir / "TopGroup_2_Layers.png"])
 
+    def test_reconstruct_base_name_uses_edited_top_layer_name(self) -> None:
+        """재구성 출력명도 선택 스택 기준 최상위 레이어의 편집명을 사용합니다."""
+
+        output_dir = WORKSPACE_DIR / f"test-reconstruct-renamed-name-output-{uuid4().hex}"
+        bottom = LayerInfo(id="0", name="Bottom", path=(), visible=True, width=1, height=1, left=0, top=0)
+        top = LayerInfo(id="1", name="Top", path=(), visible=True, width=1, height=1, left=1, top=1)
+        document = FakeDocument(
+            bottom,
+            Image.new("RGBA", (1, 1), (0, 0, 255, 255)),
+            (top, Image.new("RGBA", (1, 1), (255, 0, 0, 255))),
+        )
+        job = ExportJob(
+            source_path=Path("source.psd"),
+            output_directory=output_dir,
+            wrap_with_folder=False,
+            include_original_name=False,
+            include_layer_name=True,
+            include_layer_count=True,
+            include_date=False,
+            overwrite_existing=False,
+            export_format="PNG",
+            output_mode="reconstruct",
+            rescale=100,
+            preserve_canvas=True,
+            selected_layer_ids=("0", "1"),
+            layer_names={"1": "HeroTop"},
+        )
+
+        def capture_save(_image: Image.Image, _path: Path) -> None:
+            return None
+
+        try:
+            with (
+                patch("psd_decomposer.exporter.load_document", return_value=document),
+                patch.object(Image.Image, "save", autospec=True, side_effect=capture_save),
+            ):
+                outputs = Exporter().export(job)
+        finally:
+            _remove_output_dir(output_dir)
+
+        self.assertEqual(outputs, [output_dir / "HeroTop_2_Layers.png"])
+
     def test_export_psd_rasterizes_psd_source_layer_without_photoshop(self) -> None:
         output_dir = WORKSPACE_DIR / f"test-psd-raster-output-{uuid4().hex}"
         layer = LayerInfo(id="0", name="box", path=(), visible=True, width=2, height=2, left=3, top=1)
@@ -225,6 +302,36 @@ class ExporterImageTests(unittest.TestCase):
             self.assertEqual(len(psd), 1)
             self.assertEqual(psd[0].name, "box")
             self.assertEqual(psd[0].bbox, (3, 1, 5, 3))
+        finally:
+            _remove_output_dir(output_dir)
+
+    def test_export_psd_uses_edited_layer_name_for_file_and_pixel_layer(self) -> None:
+        """PSD 출력 파일명과 내부 레스터 레이어 이름에 편집값을 적용합니다."""
+
+        output_dir = WORKSPACE_DIR / f"test-psd-renamed-output-{uuid4().hex}"
+        layer = LayerInfo(id="0", name="box", path=(), visible=True, width=2, height=2, left=3, top=1)
+        document = FakeDocument(layer, Image.new("RGBA", (2, 2), (255, 0, 0, 255)))
+        job = ExportJob(
+            source_path=Path("source.psd"),
+            output_directory=output_dir,
+            wrap_with_folder=False,
+            include_original_name=False,
+            include_layer_name=True,
+            include_date=False,
+            overwrite_existing=False,
+            export_format="PSD",
+            rescale=100,
+            preserve_canvas=True,
+            selected_layer_ids=("0",),
+            layer_names={"0": "Hero"},
+        )
+
+        try:
+            with patch("psd_decomposer.exporter.load_document", return_value=document):
+                outputs = Exporter().export(job)
+            psd = PSDImage.open(outputs[0])
+            self.assertEqual(outputs, [output_dir / "Hero.psd"])
+            self.assertEqual(psd[0].name, "Hero")
         finally:
             _remove_output_dir(output_dir)
 
@@ -322,6 +429,37 @@ class ExporterImageTests(unittest.TestCase):
         self.assertEqual([layer.name for layer in decoded.layers], ["box"])
         self.assertEqual((decoded.frames[0].cels[0].x, decoded.frames[0].cels[0].y), (3, 1))
         self.assertEqual(decoded.frames[0].cels[0].pixels, bytes([255, 0, 0, 255]) * 4)
+
+    def test_export_ase_uses_edited_layer_name_for_file_and_layer_chunk(self) -> None:
+        """PSD에서 ASE로 변환할 때 파일명과 LayerChunk 이름에 편집값을 적용합니다."""
+
+        output_dir = WORKSPACE_DIR / f"test-psd-renamed-ase-output-{uuid4().hex}"
+        layer = LayerInfo(id="0", name="box", path=(), visible=True, width=2, height=2, left=3, top=1)
+        document = FakeDocument(layer, Image.new("RGBA", (2, 2), (255, 0, 0, 255)))
+        job = ExportJob(
+            source_path=Path("source.psd"),
+            output_directory=output_dir,
+            wrap_with_folder=False,
+            include_original_name=False,
+            include_layer_name=True,
+            include_date=False,
+            overwrite_existing=False,
+            export_format="ASE",
+            rescale=100,
+            preserve_canvas=True,
+            selected_layer_ids=("0",),
+            layer_names={"0": "Hero"},
+        )
+
+        try:
+            with patch("psd_decomposer.exporter.load_document", return_value=document):
+                outputs = Exporter().export(job)
+            decoded = decode_aseprite_file(outputs[0])
+        finally:
+            _remove_output_dir(output_dir)
+
+        self.assertEqual(outputs, [output_dir / "Hero.aseprite"])
+        self.assertEqual([layer.name for layer in decoded.layers], ["Hero"])
 
     def test_reconstruct_ase_converts_psd_selected_layers(self) -> None:
         output_dir = WORKSPACE_DIR / f"test-psd-reconstruct-ase-output-{uuid4().hex}"

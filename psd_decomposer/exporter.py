@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 from typing import Callable
 
@@ -9,7 +10,7 @@ from .aseprite_codec import keep_layers, rename_layer
 from .aseprite_codec.errors import AseEditError
 from .ase_writer import write_layers_to_aseprite
 from .document_backend import DocumentBackend, DocumentFormat, load_document
-from .models import ExportJob
+from .models import ExportJob, LayerInfo
 from .naming import build_base_name, build_output_directory, build_reconstructed_base_name, resolve_output_path
 from .psd_backend import PsdBackendError
 from .psd_writer import write_layers_to_psd
@@ -67,7 +68,7 @@ class Exporter:
         reserved_paths: set[Path] = set()
 
         for layer_id in job.selected_layer_ids:
-            layer = document.get_layer_info(layer_id)
+            layer = self._job_layer(document, job, layer_id)
             self.progress(f"PNG 렌더링 중: {layer.display_name}")
             image = self._prepare_png_image(document, layer_id, job.preserve_canvas)
             if scale != 1:
@@ -163,7 +164,7 @@ class Exporter:
         reserved_paths: set[Path] = set()
 
         for layer_id in job.selected_layer_ids:
-            layer = document.get_layer_info(layer_id)
+            layer = self._job_layer(document, job, layer_id)
             base_name = build_base_name(job, layer)
             output_path = resolve_output_path(
                 output_directory,
@@ -179,6 +180,7 @@ class Exporter:
                 output_path,
                 preserve_canvas=job.preserve_canvas,
                 rescale=job.rescale,
+                layer_names=job.layer_names,
             )
             outputs.append(output_path)
 
@@ -209,6 +211,7 @@ class Exporter:
             output_path,
             preserve_canvas=True,
             rescale=job.rescale,
+            layer_names=job.layer_names,
         )
         return [output_path]
 
@@ -219,7 +222,7 @@ class Exporter:
         reserved_paths: set[Path] = set()
 
         for layer_id in job.selected_layer_ids:
-            layer = document.get_layer_info(layer_id)
+            layer = self._job_layer(document, job, layer_id)
             base_name = build_base_name(job, layer)
             output_path = resolve_output_path(
                 output_directory,
@@ -235,6 +238,7 @@ class Exporter:
                 output_path,
                 preserve_canvas=job.preserve_canvas,
                 rescale=job.rescale,
+                layer_names=job.layer_names,
             )
             outputs.append(output_path)
 
@@ -259,6 +263,7 @@ class Exporter:
             output_path,
             preserve_canvas=True,
             rescale=job.rescale,
+            layer_names=job.layer_names,
         )
         return [output_path]
 
@@ -272,7 +277,7 @@ class Exporter:
 
         layer_ids = set(job.selected_layer_ids)
         selected_indices = {int(layer_id) for layer_id in layer_ids}
-        first_layer = document.get_layer_info(job.selected_layer_ids[0])
+        first_layer = self._job_layer(document, job, job.selected_layer_ids[0])
         base_name = (
             self._reconstructed_base_name(document, job)
             if job.output_mode == "reconstruct"
@@ -304,8 +309,7 @@ class Exporter:
         export_document.save_as(output_path)
         return [output_path]
 
-    @staticmethod
-    def _reconstructed_base_name(document: DocumentBackend, job: ExportJob) -> str:
+    def _reconstructed_base_name(self, document: DocumentBackend, job: ExportJob) -> str:
         """원본 문서 스택에서 선택된 최상위 레이어 이름과 선택 개수로 파일명을 만듭니다."""
 
         # 레이어 선택 순서가 아니라 문서의 스택 순서를 뒤에서부터 확인해 실제 최상위 선택 레이어를 대표로 사용합니다.
@@ -314,5 +318,19 @@ class Exporter:
         representative_layer = next((layer for layer in reversed(document.layers) if layer.id in selected), None)
         if representative_layer is None:
             representative_layer = document.get_layer_info(selected_layer_ids[0])
+        representative_layer = self._apply_job_layer_name(job, representative_layer)
         top_layer_name = representative_layer.path[0] if representative_layer.path else representative_layer.name
         return build_reconstructed_base_name(job, top_layer_name, len(selected_layer_ids))
+
+    def _job_layer(self, document: DocumentBackend, job: ExportJob, layer_id: str) -> LayerInfo:
+        """GUI에서 편집한 레이어명을 반영한 출력용 LayerInfo를 반환합니다."""
+
+        layer = document.get_layer_info(layer_id)
+        return self._apply_job_layer_name(job, layer)
+
+    @staticmethod
+    def _apply_job_layer_name(job: ExportJob, layer: LayerInfo) -> LayerInfo:
+        """ExportJob의 레이어명 override를 LayerInfo 값 객체에 적용합니다."""
+
+        new_name = (job.layer_names or {}).get(layer.id, "").strip()
+        return replace(layer, name=new_name) if new_name else layer

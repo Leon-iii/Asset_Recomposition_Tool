@@ -1,8 +1,9 @@
 # -*- mode: python ; coding: utf-8 -*-
-from PyInstaller.utils.hooks import collect_data_files
+from PyInstaller.utils.hooks import collect_all
 
 
-tkinterdnd2_datas = collect_data_files('tkinterdnd2')
+# tkinterdnd2는 파이썬 모듈 외에 tkdnd 플랫폼별 런타임 파일이 필요하므로 한 번에 수집합니다.
+tkinterdnd2_datas, tkinterdnd2_binaries, tkinterdnd2_hiddenimports = collect_all('tkinterdnd2')
 app_datas = [
     ('assets\\app.ico', 'assets'),
 ]
@@ -11,9 +12,9 @@ app_datas = [
 a = Analysis(
     ['main.py'],
     pathex=[],
-    binaries=[],
+    binaries=tkinterdnd2_binaries,
     datas=tkinterdnd2_datas + app_datas,
-    hiddenimports=['tkinterdnd2', 'tkinterdnd2.TkinterDnD'],
+    hiddenimports=tkinterdnd2_hiddenimports + ['tkinterdnd2', 'tkinterdnd2.TkinterDnD'],
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],

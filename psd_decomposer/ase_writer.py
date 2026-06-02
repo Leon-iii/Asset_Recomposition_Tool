@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 
 from PIL import Image
@@ -8,6 +9,7 @@ from .aseprite_codec import encode_aseprite_file
 from .aseprite_codec.constants import CEL_COMPRESSED_IMAGE, COLOR_DEPTH_RGBA
 from .aseprite_codec.model import AseFrame, AseHeader, AsepriteFile, CelChunk, LayerChunk
 from .document_backend import DocumentBackend
+from .models import LayerInfo
 
 
 def write_layers_to_aseprite(
@@ -17,6 +19,7 @@ def write_layers_to_aseprite(
     *,
     preserve_canvas: bool,
     rescale: int = 100,
+    layer_names: dict[str, str] | None = None,
 ) -> Path:
     """문서 백엔드가 렌더링한 정적 레이어 이미지를 1프레임 Aseprite 파일로 저장합니다."""
 
@@ -31,6 +34,7 @@ def write_layers_to_aseprite(
     for layer in document.layers:
         if layer.id not in selected:
             continue
+        layer = _renamed_layer(layer, layer_names)
         chunks.append(
             LayerChunk(
                 index=output_index,
@@ -69,6 +73,15 @@ def write_layers_to_aseprite(
     output_path.parent.mkdir(parents=True, exist_ok=True)
     encode_aseprite_file(ase_file, output_path)
     return output_path
+
+
+def _renamed_layer(layer: LayerInfo, layer_names: dict[str, str] | None) -> LayerInfo:
+    """GUI에서 입력한 레이어명이 있으면 출력용 LayerInfo에 반영합니다."""
+
+    if not layer_names:
+        return layer
+    name = layer_names.get(layer.id, "").strip()
+    return replace(layer, name=name) if name else layer
 
 
 def _aseprite_header(canvas_size: tuple[int, int]) -> AseHeader:

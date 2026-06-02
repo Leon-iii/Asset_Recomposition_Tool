@@ -137,9 +137,39 @@ class PsdDocument:
             raise PsdBackendError("PSD 미리보기 이미지를 생성할 수 없습니다.")
         return image.convert("RGBA")
 
+    def render_preview_thumbnail(self, max_size: tuple[int, int]):
+        """PSD 미리보기 썸네일은 기존 전체 합성 경로를 유지한 뒤 축소합니다."""
+
+        # PSD 합성 의미를 바꾸지 않도록 render_preview 결과를 그대로 사용하고 표시 크기만 줄입니다.
+        image = self.render_preview()
+        image.thumbnail(max_size)
+        return image
+
     def render_layer_thumbnail(self, layer_id: str, max_size: tuple[int, int] = (48, 48)):
         """레이어 선택 테이블에 사용할 작은 썸네일을 생성합니다."""
 
-        image = self.render_layer(layer_id).convert("RGBA")
+        node = self.get_layer_node(layer_id)
+        image = self._render_layer_thumbnail_source(node)
+        if image is None:
+            # 빠른 픽셀 추출이 불가능한 복잡한 레이어는 기존 합성 경로로 되돌립니다.
+            image = node.composite()
+        if image is None:
+            raise PsdBackendError(f"레이어를 렌더링할 수 없습니다: {self.get_layer_info(layer_id).display_name}")
+        image = image.convert("RGBA")
         image.thumbnail(max_size)
         return image
+
+    def _render_layer_thumbnail_source(self, node: Any):
+        """PSD 레이어 썸네일용 원본 이미지를 빠른 픽셀 경로로 가져옵니다."""
+
+        # 저장된 픽셀 채널이 있는 일반 레이어는 composite보다 가벼운 topil 경로를 먼저 사용합니다.
+        if not getattr(node, "has_pixels", lambda: False)():
+            return None
+        topil = getattr(node, "topil", None)
+        if topil is None:
+            return None
+        try:
+            return topil(apply_icc=False)
+        except Exception:
+            # 일부 PSD 기능이나 손상된 채널에서 topil이 실패하면 정확한 composite 경로로 fallback합니다.
+            return None

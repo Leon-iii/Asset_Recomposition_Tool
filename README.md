@@ -24,3 +24,15 @@ The output settings include a layer bounds mode:
 ```powershell
 python main.py
 ```
+
+## Build
+
+```powershell
+uv run pyinstaller --noconfirm --clean psd_decomposer.spec
+```
+
+When building without the spec file, include tkinterdnd2 runtime files explicitly:
+
+```powershell
+uv run pyinstaller --noconfirm --clean --windowed --name psd_decomposer --icon assets/app.ico --add-data "assets;assets" --collect-all tkinterdnd2 main.py
+```

@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 
 from PIL import Image
 
 from .document_backend import DocumentBackend, DocumentBackendError
+from .models import LayerInfo
 
 
 def write_layers_to_psd(
@@ -14,6 +16,7 @@ def write_layers_to_psd(
     *,
     preserve_canvas: bool,
     rescale: int = 100,
+    layer_names: dict[str, str] | None = None,
 ) -> Path:
     """문서 백엔드가 렌더링한 1프레임 레이어 이미지를 새 PSD 파일로 저장합니다."""
 
@@ -32,6 +35,7 @@ def write_layers_to_psd(
     for layer in document.layers:
         if layer.id not in selected:
             continue
+        layer = _renamed_layer(layer, layer_names)
         image, left, top = _layer_image_and_offset(document, layer.id, preserve_canvas)
         image = _scaled_image(image, scale)
         left = round(left * scale)
@@ -41,6 +45,15 @@ def write_layers_to_psd(
     output_path.parent.mkdir(parents=True, exist_ok=True)
     psd.save(output_path)
     return output_path
+
+
+def _renamed_layer(layer: LayerInfo, layer_names: dict[str, str] | None) -> LayerInfo:
+    """GUI에서 입력한 레이어명이 있으면 출력용 LayerInfo에 반영합니다."""
+
+    if not layer_names:
+        return layer
+    name = layer_names.get(layer.id, "").strip()
+    return replace(layer, name=name) if name else layer
 
 
 def _psd_canvas_size(document: DocumentBackend, layer_ids: tuple[str, ...], preserve_canvas: bool) -> tuple[int, int]:

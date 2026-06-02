@@ -52,6 +52,22 @@ class AsepriteDocumentTests(unittest.TestCase):
         self.assertEqual(image.getpixel((1, 2)), (255, 0, 0, 255))
         self.assertEqual(image.getpixel((0, 0)), (0, 0, 0, 0))
 
+    def test_render_preview_thumbnail_composites_scaled_frame_zero_cels(self) -> None:
+        document = AsepriteDocument(FIXTURE_DIR / "layer_tag_palette_cel.aseprite")
+
+        image = document.render_preview_thumbnail((2, 2))
+
+        self.assertEqual(image.size, (2, 2))
+        self.assertEqual(image.getpixel((0, 1)), (255, 0, 0, 255))
+        self.assertEqual(image.getpixel((0, 0)), (0, 0, 0, 0))
+
+    def test_render_preview_thumbnail_does_not_upscale_small_canvas(self) -> None:
+        document = AsepriteDocument(FIXTURE_DIR / "layer_tag_palette_cel.aseprite")
+
+        image = document.render_preview_thumbnail((8, 8))
+
+        self.assertEqual(image.size, (4, 4))
+
     def test_render_layer_thumbnail_keeps_image_within_requested_size(self) -> None:
         document = AsepriteDocument(FIXTURE_DIR / "layer_tag_palette_cel.aseprite")
 

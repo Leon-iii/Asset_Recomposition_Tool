@@ -8,6 +8,7 @@ from psd_decomposer.gui import (
     resolve_export_format_state,
     should_warn_aseprite_multiframe,
     should_warn_psd_rasterization,
+    should_suppress_image_worker_progress,
 )
 
 
@@ -85,6 +86,10 @@ class GuiStateTests(unittest.TestCase):
         self.assertFalse(should_warn_aseprite_multiframe(DocumentFormat.ASEPRITE, 1))
         self.assertFalse(should_warn_aseprite_multiframe(DocumentFormat.PSD, 2))
         self.assertFalse(should_warn_aseprite_multiframe(None, 2))
+
+    def test_image_worker_progress_is_suppressed_while_exporting(self) -> None:
+        self.assertTrue(should_suppress_image_worker_progress(True))
+        self.assertFalse(should_suppress_image_worker_progress(False))
 
     def test_drop_detail_text_includes_canvas_size_and_frame_count(self) -> None:
         detail_text = build_drop_detail_text(24, 16, 3)

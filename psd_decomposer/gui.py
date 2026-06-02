@@ -4,6 +4,7 @@ import queue
 import threading
 import tkinter as tk
 import sys
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
@@ -64,6 +65,12 @@ def should_warn_aseprite_multiframe(document_format: DocumentFormat | None, fram
     return document_format is DocumentFormat.ASEPRITE and frame_count >= 2
 
 
+def should_suppress_image_worker_progress(is_exporting: bool) -> bool:
+    """파일 내보내기 중 이미지 worker가 하단 진행 상태를 덮어쓰면 안 되는지 판단합니다."""
+
+    return is_exporting
+
+
 def build_drop_detail_text(width: int, height: int, frame_count: int) -> str:
     """드롭 존에 표시할 캔버스 크기와 전체 프레임 수 문구를 만듭니다."""
 
@@ -114,7 +121,7 @@ class PsdDecomposerApp:
 
         # 기본 윈도우 설정
         self.root = root
-        self.root.title("Asset Recomposition Tool v1.1")
+        self.root.title("Asset Recomposition Tool v1.2")
         self._set_window_icon()
         self.root.minsize(820, 760)
 
@@ -125,10 +132,19 @@ class PsdDecomposerApp:
         self.layer_vars: dict[str, tk.BooleanVar] = {}
         self.layer_name_vars: dict[str, tk.StringVar] = {}
         self.layer_photos: list[ImageTk.PhotoImage] = []
+        self.layer_thumbnail_labels: dict[str, ttk.Label] = {}
         self.preview_photo: ImageTk.PhotoImage | None = None
         self.select_all_check: ttk.Checkbutton | None = None
         self.is_updating_layer_selection = False
+        self.is_exporting = False
+        self.document_render_lock = threading.Lock()
         self.worker_queue: queue.Queue[tuple[str, object]] = queue.Queue()
+        self.preview_queue: queue.Queue[tuple[str, object]] = queue.Queue()
+        self.preview_generation = 0
+        self.preview_worker_running = False
+        self.thumbnail_queue: queue.Queue[tuple[str, object]] = queue.Queue()
+        self.thumbnail_generation = 0
+        self.thumbnail_worker_running = False
 
         # Tkinter 변수 초기화
         self.source_var = tk.StringVar()
@@ -188,8 +204,8 @@ class PsdDecomposerApp:
         self.drop_zone.rowconfigure(1, weight=1)
         self.drop_zone.columnconfigure(1, weight=1)
         self.drop_image_label = ttk.Label(self.drop_zone, anchor="center")
-        self.drop_title_label = ttk.Label(self.drop_zone, text="PSD 또는 Aseprite 파일을 여기에 드롭하세요", anchor="w")
-        self.drop_detail_label = ttk.Label(self.drop_zone, text="또는 파일 찾기 버튼을 사용하세요.", anchor="w")
+        self.drop_title_label = ttk.Label(self.drop_zone, text="", anchor="w")
+        self.drop_detail_label = ttk.Label(self.drop_zone, text="", anchor="w")
         self.drop_placeholder = ttk.Label(
             self.drop_zone,
             text="PSD 또는 Aseprite 파일을 여기에 드롭하세요.\n또는 파일 찾기 버튼을 사용하세요.",
@@ -561,8 +577,8 @@ class PsdDecomposerApp:
         # 파일 처리 중 상태 표시
         self._show_file_processing_message()
         try:
+            self._update_progress_status("문서 구조 읽는 중...", 20)
             document = load_document(path)
-            preview_image = document.render_preview()
         except Exception as exc:
             # 로드 실패 시 드롭 존과 상태 문구 원상복구
             self._restore_drop_zone_after_failed_load(had_loaded_file, previous_placeholder_text, previous_status)
@@ -577,14 +593,22 @@ class PsdDecomposerApp:
         self.output_dir_var.set(str(path.parent))
 
         # 미리보기와 레이어 목록 갱신
-        self._update_drop_zone(path, preview_image, self.document.frame_count)
-        self._populate_layers(self.document.layers)
+        self._update_progress_status("파일 정보 표시 중...", 70)
+        self._update_drop_zone(path, None, self.document.width, self.document.height, self.document.frame_count)
+        self._update_progress_status("레이어 목록 생성 중...", 80)
+        self._populate_layers(self.document.layers, progress_callback=self._update_progress_status)
         self._update_export_format_state()
+        # 레이어 행 생성이 끝난 뒤 원본 파일 미리보기를 생성해 상태 문구가 덮어쓰이지 않게 합니다.
+        self._start_file_preview_worker(self.document)
 
-        # 진행 표시 초기화 및 완료 메시지 표시
-        self.progress_var.set(0)
-        self._hide_progress_bar()
-        self.status_var.set(f"{path.name}에서 레이어 {len(self.document.layers)}개를 불러왔습니다.")
+        # 레이어 행을 먼저 보여준 뒤 썸네일은 백그라운드에서 채웁니다.
+        if self.document.layers:
+            self._start_layer_thumbnail_worker(self.document, self.document.layers)
+        else:
+            if not self.preview_worker_running:
+                self._update_progress_status("파일 로드 완료", 100)
+                self._hide_progress_bar()
+                self.status_var.set(f"{path.name}에서 레이어 0개를 불러왔습니다.")
         if should_warn_aseprite_multiframe(self.document.format, self.document.frame_count):
             # 현재 렌더링/변환 경로는 Aseprite의 첫 프레임만 사용하므로 멀티 프레임 입력에서는 명시적으로 경고합니다.
             messagebox.showwarning(
@@ -630,31 +654,44 @@ class PsdDecomposerApp:
         self.drop_placeholder.configure(text="파일 처리 중...")
         self.drop_placeholder.grid(row=0, column=0, rowspan=2, columnspan=2, sticky="nsew")
         # 진행 막대와 상태 메시지 표시
-        self.progress_var.set(0)
-        self._show_progress_bar()
-        self.status_var.set("파일 처리 중...")
-        self.root.update_idletasks()
+        self._update_progress_status("파일 처리 중...", 0)
 
-    def _update_drop_zone(self, path: Path, preview_image: Image.Image, frame_count: int) -> None:
+    def _update_drop_zone(
+        self,
+        path: Path,
+        preview_image: Image.Image | None,
+        canvas_width: int,
+        canvas_height: int,
+        frame_count: int,
+    ) -> None:
         """드롭 존을 안내 문구에서 파일 썸네일과 파일 정보 표시로 전환합니다."""
 
         # 파일 정보 표시 레이아웃으로 전환
         self.drop_placeholder.grid_remove()
+        self.drop_placeholder.configure(text="")
         self.drop_zone.rowconfigure(0, weight=1)
         self.drop_zone.rowconfigure(1, weight=1)
+        # 원본 프리뷰는 백그라운드 생성 전까지 빈 썸네일로 자리를 먼저 잡습니다.
+        self._set_drop_zone_preview_image(preview_image)
+        # 파일명, 캔버스 크기, 전체 프레임 수 표시
+        self.drop_title_label.configure(text=f"{path.stem}{path.suffix}")
+        self.drop_detail_label.configure(
+            text=build_drop_detail_text(canvas_width, canvas_height, frame_count)
+        )
         self.drop_image_label.grid(row=0, column=0, rowspan=2, sticky="nsw")
         self.drop_title_label.grid(row=0, column=1, sticky="sew", padx=(10, 0))
         self.drop_detail_label.grid(row=1, column=1, sticky="new", padx=(10, 0), pady=(4, 0))
-        # 원본 프리뷰 이미지로 드롭 존 썸네일 생성
+
+    def _set_drop_zone_preview_image(self, preview_image: Image.Image | None) -> None:
+        """드롭 존의 원본 파일 미리보기 이미지를 교체합니다."""
+
+        # 미리보기 렌더링이 아직 끝나지 않았으면 투명 placeholder로 레이아웃만 유지합니다.
+        if preview_image is None:
+            preview_image = Image.new("RGBA", self._drop_zone_thumbnail_size(), (0, 0, 0, 0))
         thumbnail = preview_image.convert("RGBA")
         thumbnail.thumbnail(self._drop_zone_thumbnail_size())
         self.preview_photo = ImageTk.PhotoImage(thumbnail)
         self.drop_image_label.configure(image=self.preview_photo)
-        # 파일명, 캔버스 크기, 전체 프레임 수 표시
-        self.drop_title_label.configure(text=f"{path.stem}{path.suffix}")
-        self.drop_detail_label.configure(
-            text=build_drop_detail_text(preview_image.width, preview_image.height, frame_count)
-        )
 
     def _drop_zone_thumbnail_size(self) -> tuple[int, int]:
         """현재 드롭 존 높이에 맞춰 원본 파일 썸네일의 최대 크기를 계산합니다."""
@@ -673,16 +710,11 @@ class PsdDecomposerApp:
 
     #region 레이어 테이블 및 선택 상태
 
-    def _create_layer_photo(self, layer_id: str) -> ImageTk.PhotoImage:
-        """레이어 썸네일을 만들고, 실패 시 투명 이미지로 테이블 레이아웃을 유지합니다."""
+    def _create_empty_layer_photo(self) -> ImageTk.PhotoImage:
+        """레이어 썸네일이 준비되기 전에 표시할 빈 이미지를 만듭니다."""
 
-        assert self.document is not None
-        # 레이어 렌더링 실패 시 빈 썸네일로 대체
-        try:
-            thumbnail = self.document.render_layer_thumbnail(layer_id)
-        except DocumentBackendError:
-            thumbnail = Image.new("RGBA", (48, 48), (0, 0, 0, 0))
-        return ImageTk.PhotoImage(thumbnail)
+        # PhotoImage는 Tk 메인 스레드에서만 만들고, 참조 유지를 위해 layer_photos에 보관합니다.
+        return ImageTk.PhotoImage(Image.new("RGBA", (48, 48), (0, 0, 0, 0)))
 
     def _set_all_layers(self, selected: bool) -> None:
         """전체 선택 체크박스에서 개별 레이어 체크 상태를 일괄 변경합니다."""
@@ -746,7 +778,11 @@ class PsdDecomposerApp:
         # 체크된 레이어 ID 수집
         return tuple(layer_id for layer_id, var in self.layer_vars.items() if var.get())
 
-    def _populate_layers(self, layers: tuple[LayerInfo, ...]) -> None:
+    def _populate_layers(
+        self,
+        layers: tuple[LayerInfo, ...],
+        progress_callback: Callable[[str, float], None] | None = None,
+    ) -> None:
         """레이어 선택, 썸네일, 크기, Aseprite 이름 편집 테이블을 다시 구성합니다."""
 
         # 이전 파일에서 생성한 레이어 행과 선택 상태를 모두 초기화합니다.
@@ -756,6 +792,7 @@ class PsdDecomposerApp:
         self.layer_vars.clear()
         self.layer_name_vars.clear()
         self.layer_photos.clear()
+        self.layer_thumbnail_labels.clear()
 
         # 내보낼 수 있는 레이어가 없으면 빈 상태 메시지만 표시합니다.
         if not layers:
@@ -765,8 +802,7 @@ class PsdDecomposerApp:
 
         # 파일 내부 레이어 수집 방향과 반대로 보여 주어 사용자가 보는 순서를 맞춥니다.
         display_layers = tuple(reversed(layers))
-        can_edit_aseprite = self._is_aseprite_document()
-
+        total_layers = len(display_layers)
         # 첫 칸에는 전체 선택 체크박스를 두고, 나머지 칸은 레이어 속성 헤더를 표시합니다.
         self.select_all_check = ttk.Checkbutton(
             self.layer_list,
@@ -788,8 +824,14 @@ class PsdDecomposerApp:
             self.layer_vars[layer.id] = selected_var
             self.layer_name_vars[layer.id] = name_var
 
-            # 레이어 썸네일은 Tk 이미지 참조가 사라지지 않도록 리스트에 보관합니다.
-            photo = self._create_layer_photo(layer.id)
+            # 레이어 행 생성 진행 상황만 표시하고, 실제 썸네일 렌더링은 백그라운드에서 처리합니다.
+            if progress_callback is not None and (
+                index == 0 or (index + 1) % 3 == 0 or index == total_layers - 1
+            ):
+                # 레이어가 많을 때 UI 갱신 비용이 커지지 않도록 일정 간격으로만 진행 상태를 갱신합니다.
+                progress = 80 + (index / max(1, total_layers)) * 5
+                progress_callback(f"레이어 행 생성 중... {index + 1}/{total_layers}", progress)
+            photo = self._create_empty_layer_photo()
             self.layer_photos.append(photo)
             self.layer_list.rowconfigure(row, minsize=56)
 
@@ -799,33 +841,168 @@ class PsdDecomposerApp:
                 variable=selected_var,
                 command=self._on_layer_selection_changed,
             ).grid(row=row, column=0, sticky="", padx=(0, 8), pady=4)
-            ttk.Label(self.layer_list, image=photo, anchor="center").grid(row=row, column=1, sticky="", padx=(0, 8), pady=4)
+            thumbnail_label = ttk.Label(self.layer_list, image=photo, anchor="center")
+            thumbnail_label.grid(row=row, column=1, sticky="", padx=(0, 8), pady=4)
+            self.layer_thumbnail_labels[layer.id] = thumbnail_label
             ttk.Label(
                 self.layer_list,
                 text=f"{layer.width:02d}x{layer.height:02d}",
                 anchor="center",
             ).grid(row=row, column=2, sticky="ew", padx=(0, 8), pady=4)
-            if can_edit_aseprite:
-                name_entry = ttk.Entry(self.layer_list, textvariable=name_var)
-                name_entry.bind("<FocusOut>", lambda _event, layer_id=layer.id: self._on_layer_name_committed(layer_id))
-                name_entry.bind("<Return>", lambda _event, layer_id=layer.id: self._on_layer_name_committed(layer_id))
-                name_entry.grid(row=row, column=3, sticky="ew", pady=4)
-            else:
-                ttk.Label(self.layer_list, text=layer.display_name, anchor="w").grid(row=row, column=3, sticky="ew", pady=4)
+            name_entry = ttk.Entry(self.layer_list, textvariable=name_var)
+            name_entry.bind("<FocusOut>", lambda _event, layer_id=layer.id: self._on_layer_name_committed(layer_id))
+            name_entry.bind("<Return>", lambda _event, layer_id=layer.id: self._on_layer_name_committed(layer_id))
+            name_entry.grid(row=row, column=3, sticky="ew", pady=4)
             ttk.Separator(self.layer_list, orient="horizontal").grid(row=row + 1, column=0, columnspan=4, sticky="ew", pady=(0, 1))
 
         # 생성된 선택 상태를 기준으로 전체 선택 체크박스와 내보내기 버튼을 동기화합니다.
         self._update_layer_selection_state()
 
-    def _is_aseprite_document(self) -> bool:
-        """현재 로드된 문서가 Aseprite 문서인지 확인합니다."""
+    def _start_file_preview_worker(self, document: DocumentBackend) -> None:
+        """원본 파일 미리보기를 백그라운드에서 생성하기 시작합니다."""
 
-        return self.document is not None and self.document.format is DocumentFormat.ASEPRITE
+        # 파일이 다시 로드되면 이전 미리보기 결과를 버릴 수 있도록 세대 번호를 갱신합니다.
+        self.preview_generation += 1
+        generation = self.preview_generation
+        max_size = self._drop_zone_thumbnail_size()
+        self.preview_worker_running = True
+        self._update_image_worker_progress_status("미리보기 이미지 생성 중...", 85)
+        threading.Thread(
+            target=self._run_file_preview_worker,
+            args=(generation, document, max_size),
+            daemon=True,
+        ).start()
+        self.root.after(50, self._poll_preview_queue)
+
+    def _run_file_preview_worker(
+        self,
+        generation: int,
+        document: DocumentBackend,
+        max_size: tuple[int, int],
+    ) -> None:
+        """워커 스레드에서 원본 파일 미리보기 PIL 이미지를 생성해 큐로 전달합니다."""
+
+        try:
+            # psd-tools 문서 객체에 동시에 접근하지 않도록 미리보기와 레이어 썸네일 렌더링을 직렬화합니다.
+            with self.document_render_lock:
+                image = document.render_preview_thumbnail(max_size)
+        except Exception as exc:
+            self.preview_queue.put(("preview_error", (generation, exc)))
+        else:
+            self.preview_queue.put(("preview", (generation, image)))
+
+    def _poll_preview_queue(self) -> None:
+        """원본 파일 미리보기 워커 결과를 메인 스레드에서 드롭 존에 반영합니다."""
+
+        try:
+            kind, payload = self.preview_queue.get_nowait()
+        except queue.Empty:
+            if self.preview_worker_running:
+                self.root.after(50, self._poll_preview_queue)
+            return
+
+        if kind == "preview":
+            generation, image = payload
+            if generation == self.preview_generation:
+                self._set_drop_zone_preview_image(image)
+                self.preview_worker_running = False
+        elif kind == "preview_error":
+            generation, _exc = payload
+            if generation == self.preview_generation:
+                # 미리보기 실패는 파일 로드 자체를 막지 않고 빈 썸네일 상태로 둡니다.
+                self.preview_worker_running = False
+
+        # 미리보기가 끝난 뒤에만 다음 백그라운드 작업 문구나 완료 문구로 전환합니다.
+        if not self.preview_worker_running:
+            if self.thumbnail_worker_running:
+                self._update_image_worker_progress_status("레이어 썸네일 생성 중...", 85)
+            elif self.source_path is not None and self.document is not None:
+                self._finish_image_worker_progress_status()
+            return
+
+        if self.preview_worker_running:
+            self.root.after(50, self._poll_preview_queue)
+
+    def _start_layer_thumbnail_worker(self, document: DocumentBackend, layers: tuple[LayerInfo, ...]) -> None:
+        """레이어 썸네일을 백그라운드에서 생성하기 시작합니다."""
+
+        # 새 파일 로드마다 세대 번호를 올려 이전 워커의 늦은 결과가 현재 테이블에 섞이지 않게 합니다.
+        self.thumbnail_generation += 1
+        generation = self.thumbnail_generation
+        layer_ids = tuple(layer.id for layer in reversed(layers))
+        if not self.preview_worker_running:
+            self._update_image_worker_progress_status(f"레이어 썸네일 생성 중... 0/{len(layer_ids)}", 85)
+        threading.Thread(
+            target=self._run_layer_thumbnail_worker,
+            args=(generation, document, layer_ids),
+            daemon=True,
+        ).start()
+        if not self.thumbnail_worker_running:
+            self.thumbnail_worker_running = True
+            self.root.after(50, self._poll_thumbnail_queue)
+
+    def _run_layer_thumbnail_worker(
+        self,
+        generation: int,
+        document: DocumentBackend,
+        layer_ids: tuple[str, ...],
+    ) -> None:
+        """워커 스레드에서 PIL 레이어 썸네일을 생성해 큐로 전달합니다."""
+
+        total = max(1, len(layer_ids))
+        for index, layer_id in enumerate(layer_ids):
+            try:
+                # 원본 미리보기 렌더링과 같은 문서 객체를 공유하므로 접근을 직렬화합니다.
+                with self.document_render_lock:
+                    image = document.render_layer_thumbnail(layer_id)
+            except DocumentBackendError:
+                image = Image.new("RGBA", (48, 48), (0, 0, 0, 0))
+            self.thumbnail_queue.put(("thumbnail", (generation, layer_id, image, index + 1, total)))
+        self.thumbnail_queue.put(("thumbnail_done", generation))
+
+    def _poll_thumbnail_queue(self) -> None:
+        """썸네일 워커 결과를 메인 스레드에서 레이어 테이블에 반영합니다."""
+
+        # 한 번에 여러 결과를 처리해 레이어가 많을 때도 큐가 불필요하게 밀리지 않게 합니다.
+        processed = 0
+        while processed < 8:
+            try:
+                kind, payload = self.thumbnail_queue.get_nowait()
+            except queue.Empty:
+                break
+            processed += 1
+            if kind == "thumbnail":
+                generation, layer_id, image, current, total = payload
+                if generation != self.thumbnail_generation:
+                    continue
+                label = self.layer_thumbnail_labels.get(layer_id)
+                if label is not None:
+                    # Tk 이미지는 메인 스레드에서 생성하고 참조를 보관해야 화면에 유지됩니다.
+                    photo = ImageTk.PhotoImage(image)
+                    self.layer_photos.append(photo)
+                    label.configure(image=photo)
+                if not self.preview_worker_running:
+                    self._update_image_worker_progress_status(
+                        f"레이어 썸네일 생성 중... {current}/{total}",
+                        85 + (current / total) * 10,
+                    )
+            elif kind == "thumbnail_done":
+                generation = payload
+                if generation != self.thumbnail_generation:
+                    continue
+                self.thumbnail_worker_running = False
+                if self.preview_worker_running:
+                    return
+                self._finish_image_worker_progress_status()
+                return
+
+        if self.thumbnail_worker_running:
+            self.root.after(50, self._poll_thumbnail_queue)
 
     def _on_layer_name_committed(self, layer_id: str) -> str:
-        """Aseprite 레이어 이름 입력칸의 변경 내용을 GUI 모델에 보정합니다."""
+        """레이어 이름 입력칸의 변경 내용을 GUI 모델에 보정합니다."""
 
-        if not self._is_aseprite_document() or self.document is None:
+        if self.document is None:
             return "break"
         name_var = self.layer_name_vars[layer_id]
         current_layer = self.document.get_layer_info(layer_id)
@@ -841,6 +1018,35 @@ class PsdDecomposerApp:
     #endregion
 
     #region 진행 상태 표시
+
+    def _update_progress_status(self, message: str, value: float) -> None:
+        """작업 단계 문구와 진행 막대를 같은 방식으로 갱신합니다."""
+
+        # 파일 전처리와 내보내기 모두 동일한 하단 상태 표시 흐름을 사용합니다.
+        self.status_var.set(message)
+        self.progress_var.set(max(0, min(100, value)))
+        self._show_progress_bar()
+        self.root.update_idletasks()
+
+    def _update_image_worker_progress_status(self, message: str, value: float) -> None:
+        """미리보기/썸네일 worker의 진행 표시가 내보내기 상태를 덮지 않게 갱신합니다."""
+
+        # 내보내기 중에는 이미지 worker가 끝나거나 진행되어도 하단 진행 상태를 건드리지 않습니다.
+        if should_suppress_image_worker_progress(self.is_exporting):
+            return
+        self._update_progress_status(message, value)
+
+    def _finish_image_worker_progress_status(self) -> None:
+        """미리보기/썸네일 worker 완료 상태를 내보내기 중이 아닐 때만 표시합니다."""
+
+        # 이미지 worker는 계속 결과를 반영하되, 내보내기 중에는 완료 문구와 progress bar 숨김도 보류합니다.
+        if should_suppress_image_worker_progress(self.is_exporting):
+            return
+        if self.source_path is None or self.document is None:
+            return
+        self._update_progress_status("파일 로드 완료", 100)
+        self._hide_progress_bar()
+        self.status_var.set(f"{self.source_path.name}에서 레이어 {len(self.document.layers)}개를 불러왔습니다.")
 
     def _show_progress_bar(self) -> None:
         """파일 로드나 내보내기 작업 중에만 진행 막대를 상태 문구 오른쪽에 표시합니다."""
@@ -923,9 +1129,8 @@ class PsdDecomposerApp:
             )
         # 설정 저장 및 진행 상태 초기화
         self._save_settings()
-        self.progress_var.set(0)
-        self._show_progress_bar()
-        self.status_var.set("내보내는 중...")
+        self.is_exporting = True
+        self._update_progress_status("내보내는 중...", 0)
         # 백그라운드 스레드 시작 및 결과 큐 polling 예약
         threading.Thread(target=self._run_export, args=(job,), daemon=True).start()
         self.root.after(100, self._poll_worker_queue)
@@ -965,22 +1170,21 @@ class PsdDecomposerApp:
         # 진행 메시지 처리
         if kind == "progress":
             current, total, message = payload
-            self.progress_var.set(min(100, current / total * 100))
-            self.status_var.set(f"{message} ({current}/{total})")
+            self._update_progress_status(f"{message} ({current}/{total})", min(100, current / total * 100))
             self.root.after(100, self._poll_worker_queue)
         # 오류 메시지 처리
         elif kind == "error":
-            self.progress_var.set(0)
+            self._update_progress_status("내보내기에 실패했습니다.", 0)
             self._hide_progress_bar()
-            self.status_var.set("내보내기에 실패했습니다.")
             messagebox.showerror("내보내기 실패", str(payload))
+            self.is_exporting = False
         # 완료 메시지 처리
         elif kind == "done":
             outputs = payload
-            self.progress_var.set(100)
-            self.status_var.set(f"내보내기 완료: 파일 {len(outputs)}개")
+            self._update_progress_status(f"내보내기 완료: 파일 {len(outputs)}개", 100)
             messagebox.showinfo("내보내기 완료", f"파일 {len(outputs)}개를 내보냈습니다.")
             self._hide_progress_bar()
+            self.is_exporting = False
 
     #endregion
 

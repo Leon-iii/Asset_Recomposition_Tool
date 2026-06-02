@@ -149,10 +149,60 @@ class AsepriteDocument:
             canvas.alpha_composite(image, dest=(renderable_cel.x, renderable_cel.y))
         return canvas
 
+    def render_preview_thumbnail(self, max_size: tuple[int, int]) -> Image.Image:
+        """드롭 존 표시용 Aseprite 미리보기를 처음부터 축소 크기로 합성합니다."""
+
+        # 원본 크기가 이미 표시 영역보다 작으면 기존 전체 미리보기와 같은 이미지를 반환합니다.
+        target_size, scale = self._thumbnail_canvas_size(max_size)
+        if scale >= 1:
+            return self.render_preview()
+
+        canvas = Image.new("RGBA", target_size, (0, 0, 0, 0))
+        if not self.ase_file.frames:
+            return canvas
+
+        # 첫 프레임의 표시 가능한 cel만 축소한 뒤 위치도 같은 배율로 줄여 합성합니다.
+        frame = self.ase_file.frames[0]
+        for cel in sorted(frame.cels, key=lambda item: (item.layer_index, item.z_index)):
+            layer = self._ase_layers_by_index.get(cel.layer_index)
+            if layer is None or not layer.visible:
+                continue
+            renderable_cel = self._resolve_linked_cel(cel, frame_index=0)
+            if renderable_cel is None:
+                continue
+            image = self._cel_to_image(renderable_cel, layer.opacity)
+            image = self._resize_for_preview_thumbnail(image, scale)
+            canvas.alpha_composite(
+                image,
+                dest=(int(renderable_cel.x * scale), int(renderable_cel.y * scale)),
+            )
+        return canvas
+
     def render_layer_thumbnail(self, layer_id: str, max_size: tuple[int, int] = (48, 48)) -> Image.Image:
         image = self.render_layer(layer_id).convert("RGBA")
         image.thumbnail(max_size)
         return image
+
+    def _thumbnail_canvas_size(self, max_size: tuple[int, int]) -> tuple[tuple[int, int], float]:
+        """원본 캔버스와 요청 크기로 썸네일 캔버스 크기와 축소 배율을 계산합니다."""
+
+        # thumbnail 동작처럼 원본보다 크게 확대하지 않고, 0 이하 요청값은 최소 1px로 보정합니다.
+        max_width = max(1, int(max_size[0]))
+        max_height = max(1, int(max_size[1]))
+        source_width = max(1, int(self.width))
+        source_height = max(1, int(self.height))
+        scale = min(1.0, max_width / source_width, max_height / source_height)
+        target_width = max(1, round(source_width * scale))
+        target_height = max(1, round(source_height * scale))
+        return (target_width, target_height), scale
+
+    def _resize_for_preview_thumbnail(self, image: Image.Image, scale: float) -> Image.Image:
+        """cel 이미지를 미리보기 배율에 맞게 축소합니다."""
+
+        # 매우 얇은 cel도 썸네일에서 완전히 사라지지 않도록 각 축을 최소 1px로 유지합니다.
+        width = max(1, round(image.width * scale))
+        height = max(1, round(image.height * scale))
+        return image.resize((width, height), Image.Resampling.LANCZOS)
 
     def _find_renderable_cel(self, layer_index: int, frame_index: int) -> CelChunk | None:
         if not self.ase_file.frames:
