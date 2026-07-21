@@ -40,7 +40,11 @@ def write_layers_to_psd(
         image = _scaled_image(image, scale)
         left = round(left * scale)
         top = round(top * scale)
-        psd.create_pixel_layer(image, name=layer.name, top=top, left=left)
+
+        # psd-tools 생성 API는 전달받은 이름을 구형 MacRoman 필드에 직접 넣으므로 먼저 안전한 이름으로 생성합니다.
+        pixel_layer = psd.create_pixel_layer(image, name="Layer", top=top, left=left)
+        # name setter를 거치면 MacRoman 대체값과 PSD Unicode 레이어명 태그(luni)가 함께 기록됩니다.
+        pixel_layer.name = layer.name
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     psd.save(output_path)

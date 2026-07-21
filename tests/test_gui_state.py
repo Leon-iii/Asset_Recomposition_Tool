@@ -5,6 +5,7 @@ import unittest
 from psd_decomposer.document_backend import DocumentFormat
 from psd_decomposer.gui import (
     build_drop_detail_text,
+    resolve_export_button_state,
     resolve_export_format_state,
     should_warn_aseprite_multiframe,
     should_warn_psd_rasterization,
@@ -90,6 +91,13 @@ class GuiStateTests(unittest.TestCase):
     def test_image_worker_progress_is_suppressed_while_exporting(self) -> None:
         self.assertTrue(should_suppress_image_worker_progress(True))
         self.assertFalse(should_suppress_image_worker_progress(False))
+
+    def test_export_button_is_disabled_while_exporting(self) -> None:
+        """선택된 레이어가 있어도 내보내기 중에는 실행 버튼을 비활성화합니다."""
+
+        self.assertEqual(resolve_export_button_state(1, True), "disabled")
+        self.assertEqual(resolve_export_button_state(1, False), "normal")
+        self.assertEqual(resolve_export_button_state(0, False), "disabled")
 
     def test_drop_detail_text_includes_canvas_size_and_frame_count(self) -> None:
         detail_text = build_drop_detail_text(24, 16, 3)

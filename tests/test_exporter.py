@@ -335,6 +335,36 @@ class ExporterImageTests(unittest.TestCase):
         finally:
             _remove_output_dir(output_dir)
 
+    def test_export_psd_preserves_korean_layer_name(self) -> None:
+        """한글 레이어명을 Unicode 태그로 기록해 PSD 저장 오류 없이 보존합니다."""
+
+        output_dir = WORKSPACE_DIR / f"test-psd-korean-name-output-{uuid4().hex}"
+        layer = LayerInfo(id="0", name="원본", path=(), visible=True, width=2, height=2, left=0, top=0)
+        document = FakeDocument(layer, Image.new("RGBA", (2, 2), (255, 0, 0, 255)))
+        job = ExportJob(
+            source_path=Path("source.psd"),
+            output_directory=output_dir,
+            wrap_with_folder=False,
+            include_original_name=False,
+            include_layer_name=True,
+            include_date=False,
+            overwrite_existing=False,
+            export_format="PSD",
+            rescale=100,
+            preserve_canvas=True,
+            selected_layer_ids=("0",),
+            layer_names={"0": "캐릭터"},
+        )
+
+        try:
+            with patch("psd_decomposer.exporter.load_document", return_value=document):
+                outputs = Exporter().export(job)
+            psd = PSDImage.open(outputs[0])
+            self.assertEqual(outputs, [output_dir / "캐릭터.psd"])
+            self.assertEqual(psd[0].name, "캐릭터")
+        finally:
+            _remove_output_dir(output_dir)
+
     def test_export_psd_converts_aseprite_first_frame_layer(self) -> None:
         source_path = WORKSPACE_DIR / f"test-ase-to-psd-source-{uuid4().hex}.aseprite"
         output_dir = WORKSPACE_DIR / f"test-ase-to-psd-output-{uuid4().hex}"

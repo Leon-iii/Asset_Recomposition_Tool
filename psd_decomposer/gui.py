@@ -71,6 +71,12 @@ def should_suppress_image_worker_progress(is_exporting: bool) -> bool:
     return is_exporting
 
 
+def resolve_export_button_state(selected_count: int, is_exporting: bool) -> str:
+    """레이어 선택 개수와 내보내기 여부를 기준으로 내보내기 버튼 상태를 계산합니다."""
+
+    return "normal" if selected_count > 0 and not is_exporting else "disabled"
+
+
 def build_drop_detail_text(width: int, height: int, frame_count: int) -> str:
     """드롭 존에 표시할 캔버스 크기와 전체 프레임 수 문구를 만듭니다."""
 
@@ -121,7 +127,7 @@ class PsdDecomposerApp:
 
         # 기본 윈도우 설정
         self.root = root
-        self.root.title("Asset Recomposition Tool v1.2")
+        self.root.title("Asset Recomposition Tool v1.3")
         self._set_window_icon()
         self.root.minsize(820, 760)
 
@@ -769,8 +775,10 @@ class PsdDecomposerApp:
                 self.select_all_var.set(total_count > 0 and selected_count == total_count)
         self.is_updating_layer_selection = False
 
-        # 선택된 레이어가 있을 때만 내보내기 버튼 활성화
-        self.export_button.configure(state="normal" if selected_count > 0 else "disabled")
+        # 선택된 레이어가 있어도 내보내기 worker가 실행 중이면 중복 실행을 막기 위해 버튼을 비활성화합니다.
+        self.export_button.configure(
+            state=resolve_export_button_state(selected_count, self.is_exporting)
+        )
 
     def _current_selected_layer_ids(self) -> tuple[str, ...]:
         """현재 체크된 레이어 id만 내보내기 순서대로 반환합니다."""
@@ -1113,6 +1121,9 @@ class PsdDecomposerApp:
     def _start_export(self) -> None:
         """내보내기 설정을 저장하고 백그라운드 스레드에서 Exporter를 실행합니다."""
 
+        # 내보내기 worker가 이미 실행 중이면 빠른 연속 클릭으로 작업이 중복 시작되지 않게 합니다.
+        if self.is_exporting:
+            return
         # 입력 파일 없는 경우 경고
         if self.source_path is None:
             messagebox.showwarning("파일 없음", "파일을 먼저 선택하세요.")
@@ -1130,6 +1141,7 @@ class PsdDecomposerApp:
         # 설정 저장 및 진행 상태 초기화
         self._save_settings()
         self.is_exporting = True
+        self._update_layer_selection_state()
         self._update_progress_status("내보내는 중...", 0)
         # 백그라운드 스레드 시작 및 결과 큐 polling 예약
         threading.Thread(target=self._run_export, args=(job,), daemon=True).start()
@@ -1178,6 +1190,7 @@ class PsdDecomposerApp:
             self._hide_progress_bar()
             messagebox.showerror("내보내기 실패", str(payload))
             self.is_exporting = False
+            self._update_layer_selection_state()
         # 완료 메시지 처리
         elif kind == "done":
             outputs = payload
@@ -1185,6 +1198,7 @@ class PsdDecomposerApp:
             messagebox.showinfo("내보내기 완료", f"파일 {len(outputs)}개를 내보냈습니다.")
             self._hide_progress_bar()
             self.is_exporting = False
+            self._update_layer_selection_state()
 
     #endregion
 
