@@ -5,12 +5,13 @@ import threading
 import tkinter as tk
 import sys
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 
 from PIL import Image, ImageTk
 
+from .blend_modes import blend_mode_display_name, blend_mode_to_aseprite
 from .config import AppSettings
 from .document_backend import DocumentBackend, DocumentBackendError, DocumentFormat, SUPPORTED_EXTENSIONS, load_document, to_document_error
 from .exporter import Exporter
@@ -63,6 +64,27 @@ def should_warn_aseprite_multiframe(document_format: DocumentFormat | None, fram
     """Aseprite 원본이 멀티 프레임이면 Frame 1만 처리한다는 경고가 필요한지 판단합니다."""
 
     return document_format is DocumentFormat.ASEPRITE and frame_count >= 2
+
+
+def resolve_blend_mode_control_state(output_mode: str, export_format: str) -> str:
+    """블렌드 모드 출력 옵션이 PNG 분해 모드에서만 활성화되도록 상태를 계산합니다."""
+
+    return "normal" if output_mode == "decompose" and export_format == "PNG" else "disabled"
+
+
+def find_unsupported_aseprite_blend_mode_layers(
+    layers: tuple[LayerInfo, ...],
+    selected_layer_ids: tuple[str, ...],
+) -> tuple[LayerInfo, ...]:
+    """선택 레이어 중 Aseprite로 직접 변환할 수 없는 블렌드 모드를 찾습니다."""
+
+    # 화면 표시 순서를 유지해 경고 목록과 레이어 테이블의 순서가 같게 보이도록 합니다.
+    selected = set(selected_layer_ids)
+    return tuple(
+        layer
+        for layer in layers
+        if layer.id in selected and blend_mode_to_aseprite(layer.blend_mode) is None
+    )
 
 
 def should_suppress_image_worker_progress(is_exporting: bool) -> bool:
@@ -163,6 +185,7 @@ class PsdDecomposerApp:
         self.overwrite_existing_var = tk.BooleanVar(value=self.settings.overwrite_existing)
         self.output_mode_var = tk.StringVar(value=self.settings.output_mode)
         self.format_var = tk.StringVar(value=self.settings.export_format)
+        self.png_blend_mode_var = tk.StringVar(value=self.settings.png_blend_mode_policy)
         self.rescale_var = tk.IntVar(value=self.settings.rescale)
         self.layer_bounds_var = tk.StringVar(value="preserve" if self.settings.preserve_canvas else "crop")
         self.select_all_var = tk.BooleanVar(value=False)
@@ -256,7 +279,7 @@ class PsdDecomposerApp:
         canvas = tk.Canvas(layer_frame, highlightthickness=0)
         scrollbar = ttk.Scrollbar(layer_frame, orient="vertical", command=canvas.yview)
         self.layer_list = ttk.Frame(canvas)
-        self.layer_list.columnconfigure(3, weight=1)
+        self.layer_list.columnconfigure(4, weight=1)
         self.layer_list.bind("<Configure>", lambda _event: canvas.configure(scrollregion=canvas.bbox("all")))
         self.layer_list_window = canvas.create_window((0, 0), window=self.layer_list, anchor="nw")
         canvas.bind(
@@ -380,10 +403,29 @@ class PsdDecomposerApp:
         format_frame = ttk.Frame(settings_frame)
         format_frame.grid(row=6, column=1, columnspan=2, sticky="w", padx=(8, 0), pady=(14, 0))
         # 출력 형식 선택지는 pack 간격으로 한 줄에 정렬합니다.
-        self.psd_radio = ttk.Radiobutton(format_frame, text="PSD", variable=self.format_var, value="PSD")
+        self.psd_radio = ttk.Radiobutton(
+            format_frame,
+            text="PSD",
+            variable=self.format_var,
+            value="PSD",
+            command=self._on_export_format_changed,
+        )
         self.psd_radio.pack(side="left")
-        ttk.Radiobutton(format_frame, text="PNG", variable=self.format_var, value="PNG").pack(side="left", padx=(16, 0))
-        self.ase_radio = ttk.Radiobutton(format_frame, text="ASE", variable=self.format_var, value="ASE")
+        self.png_radio = ttk.Radiobutton(
+            format_frame,
+            text="PNG",
+            variable=self.format_var,
+            value="PNG",
+            command=self._on_export_format_changed,
+        )
+        self.png_radio.pack(side="left", padx=(16, 0))
+        self.ase_radio = ttk.Radiobutton(
+            format_frame,
+            text="ASE",
+            variable=self.format_var,
+            value="ASE",
+            command=self._on_export_format_changed,
+        )
         self.ase_radio.pack(side="left", padx=(16, 0))
 
         # 확대 비율 라디오 버튼 배치
@@ -413,6 +455,10 @@ class PsdDecomposerApp:
             value="preserve",
         )
         self.preserve_bounds_radio.pack(anchor="w")
+        Tooltip(
+            self.preserve_bounds_radio,
+            "원본 캔버스 크기를 유지하고 레이어 오브젝트를 원래 좌표에 배치해 저장합니다.",
+        )
         self.crop_bounds_radio = ttk.Radiobutton(
             bounds_frame,
             text="레이어 오브젝트만 크롭",
@@ -420,10 +466,46 @@ class PsdDecomposerApp:
             value="crop",
         )
         self.crop_bounds_radio.pack(anchor="w", pady=(2, 0))
+        Tooltip(
+            self.crop_bounds_radio,
+            "투명 여백을 제외한 레이어 오브젝트 영역만 잘라 별도 이미지로 저장합니다.",
+        )
+
+        # 개별 PNG 레이어에서 원본 모드를 무시할지, 하위 배경을 반영한 결과를 유지할지 선택합니다.
+        blend_mode_label = ttk.Label(settings_frame, text="블렌드 모드")
+        blend_mode_label.grid(row=9, column=0, sticky="w", pady=(14, 0))
+        Tooltip(
+            blend_mode_label,
+            "분해 모드의 PNG 출력에서 레이어 블렌드 모드를 처리하는 방식입니다.",
+        )
+        blend_mode_frame = ttk.Frame(settings_frame)
+        blend_mode_frame.grid(row=9, column=1, columnspan=2, sticky="w", padx=(8, 0), pady=(14, 0))
+        self.standard_blend_radio = ttk.Radiobutton(
+            blend_mode_frame,
+            text="표준 레이어로 취급",
+            variable=self.png_blend_mode_var,
+            value="standard",
+        )
+        self.standard_blend_radio.pack(anchor="w")
+        Tooltip(
+            self.standard_blend_radio,
+            "원본 블렌드 모드를 무시하고 레스터화된 레이어 픽셀과 투명도를 그대로 저장합니다.",
+        )
+        self.preserve_blend_result_radio = ttk.Radiobutton(
+            blend_mode_frame,
+            text="혼합 결과 유지",
+            variable=self.png_blend_mode_var,
+            value="preserve_result",
+        )
+        self.preserve_blend_result_radio.pack(anchor="w", pady=(2, 0))
+        Tooltip(
+            self.preserve_blend_result_radio,
+            "하위 레이어 색상을 참고해 같은 배경 위에서 Normal로 보여도 동일한 PNG를 만듭니다.",
+        )
 
         # Aseprite 원본 편집 내용 저장 버튼은 Aseprite 문서가 로드된 경우에만 활성화합니다.
         ase_save_frame = ttk.Frame(settings_frame)
-        ase_save_frame.grid(row=9, column=0, columnspan=3, sticky="ew", pady=(16, 0))
+        ase_save_frame.grid(row=10, column=0, columnspan=3, sticky="ew", pady=(16, 0))
         ase_save_label = ttk.Label(ase_save_frame, text="Aseprite 저장")
         ase_save_label.pack(side="left")
         Tooltip(ase_save_label, "레이어 이름과 표시 상태 변경을 Aseprite 파일에 저장합니다.")
@@ -477,6 +559,11 @@ class PsdDecomposerApp:
         # 라디오 버튼에서 바뀐 모드에 맞춰 의존 옵션을 잠그거나 해제합니다.
         self._update_output_mode_controls()
 
+    def _on_export_format_changed(self) -> None:
+        """출력 형식 변경 시 PNG 전용 블렌드 모드 옵션의 활성 상태를 갱신합니다."""
+
+        self._update_blend_mode_controls()
+
     def _update_output_mode_controls(self) -> None:
         """재구성 모드에서 하위 폴더 묶기와 레이어 crop 옵션을 비활성화합니다."""
 
@@ -493,6 +580,18 @@ class PsdDecomposerApp:
         self.preserve_bounds_radio.configure(state=control_state)
         self.crop_bounds_radio.configure(state=control_state)
         self.layer_count_check.configure(state="normal" if is_reconstruct else "disabled")
+        self._update_blend_mode_controls()
+
+    def _update_blend_mode_controls(self) -> None:
+        """분해 모드와 PNG 출력이 함께 선택된 경우에만 블렌드 모드 정책을 활성화합니다."""
+
+        # 비활성화 시에도 사용자가 고른 값은 유지해 다시 PNG 분해로 돌아왔을 때 복원합니다.
+        control_state = resolve_blend_mode_control_state(
+            self.output_mode_var.get(),
+            self.format_var.get(),
+        )
+        self.standard_blend_radio.configure(state=control_state)
+        self.preserve_blend_result_radio.configure(state=control_state)
 
     #endregion
 
@@ -821,8 +920,9 @@ class PsdDecomposerApp:
         self.select_all_check.grid(row=0, column=0, sticky="", padx=(0, 8), pady=(0, 6))
         ttk.Label(self.layer_list, text="미리보기", anchor="center").grid(row=0, column=1, sticky="ew", padx=(0, 8), pady=(0, 6))
         ttk.Label(self.layer_list, text="크기", anchor="center").grid(row=0, column=2, sticky="ew", padx=(0, 8), pady=(0, 6))
-        ttk.Label(self.layer_list, text="레이어 이름", anchor="w").grid(row=0, column=3, sticky="ew", pady=(0, 6))
-        ttk.Separator(self.layer_list, orient="horizontal").grid(row=1, column=0, columnspan=4, sticky="ew", pady=(0, 4))
+        ttk.Label(self.layer_list, text="모드", anchor="center").grid(row=0, column=3, sticky="ew", padx=(0, 8), pady=(0, 6))
+        ttk.Label(self.layer_list, text="레이어 이름", anchor="w").grid(row=0, column=4, sticky="ew", pady=(0, 6))
+        ttk.Separator(self.layer_list, orient="horizontal").grid(row=1, column=0, columnspan=5, sticky="ew", pady=(0, 4))
 
         # 각 레이어를 한 행으로 만들고 행 사이에 구분선을 배치합니다.
         for index, layer in enumerate(display_layers):
@@ -843,7 +943,7 @@ class PsdDecomposerApp:
             self.layer_photos.append(photo)
             self.layer_list.rowconfigure(row, minsize=56)
 
-            # 선택, 썸네일, 크기, 이름 셀을 같은 행 높이 안에서 가운데 정렬합니다.
+            # 선택, 썸네일, 크기, 모드, 이름 셀을 같은 행 높이 안에서 가운데 정렬합니다.
             ttk.Checkbutton(
                 self.layer_list,
                 variable=selected_var,
@@ -857,11 +957,17 @@ class PsdDecomposerApp:
                 text=f"{layer.width:02d}x{layer.height:02d}",
                 anchor="center",
             ).grid(row=row, column=2, sticky="ew", padx=(0, 8), pady=4)
+            ttk.Label(
+                self.layer_list,
+                text=blend_mode_display_name(layer.blend_mode),
+                anchor="center",
+                width=11,
+            ).grid(row=row, column=3, sticky="ew", padx=(0, 8), pady=4)
             name_entry = ttk.Entry(self.layer_list, textvariable=name_var)
             name_entry.bind("<FocusOut>", lambda _event, layer_id=layer.id: self._on_layer_name_committed(layer_id))
             name_entry.bind("<Return>", lambda _event, layer_id=layer.id: self._on_layer_name_committed(layer_id))
-            name_entry.grid(row=row, column=3, sticky="ew", pady=4)
-            ttk.Separator(self.layer_list, orient="horizontal").grid(row=row + 1, column=0, columnspan=4, sticky="ew", pady=(0, 1))
+            name_entry.grid(row=row, column=4, sticky="ew", pady=4)
+            ttk.Separator(self.layer_list, orient="horizontal").grid(row=row + 1, column=0, columnspan=5, sticky="ew", pady=(0, 1))
 
         # 생성된 선택 상태를 기준으로 전체 선택 체크박스와 내보내기 버튼을 동기화합니다.
         self._update_layer_selection_state()
@@ -1085,12 +1191,8 @@ class PsdDecomposerApp:
         # 계산된 출력 형식을 GUI 상태에 반영
         self.format_var.set(state.format_value)
         self.ase_radio.configure(state="normal" if state.ase_enabled else "disabled")
-        if state.psd_enabled:
-            self.psd_radio.configure(state="normal")
-            return
-
-        # PSD 출력을 사용할 수 없는 상태에서는 라디오 버튼 비활성화
-        self.psd_radio.configure(state="disabled")
+        self.psd_radio.configure(state="normal" if state.psd_enabled else "disabled")
+        self._update_blend_mode_controls()
 
     def _create_export_job(self, selected_layer_ids: tuple[str, ...]) -> ExportJob:
         """현재 GUI 상태를 Exporter가 사용할 불변 작업 데이터로 변환합니다."""
@@ -1116,6 +1218,7 @@ class PsdDecomposerApp:
             preserve_canvas=True if is_reconstruct else self.layer_bounds_var.get() == "preserve",
             selected_layer_ids=selected_layer_ids,
             layer_names={layer_id: var.get().strip() for layer_id, var in self.layer_name_vars.items()},
+            png_blend_mode_policy=self.png_blend_mode_var.get(),
         )
 
     def _start_export(self) -> None:
@@ -1131,6 +1234,26 @@ class PsdDecomposerApp:
         # 선택 레이어와 내보내기 작업 생성
         selected_layer_ids = self._current_selected_layer_ids()
         job = self._create_export_job(selected_layer_ids)
+        if self.document is not None and self.document.format is DocumentFormat.PSD and job.export_format == "ASE":
+            # Aseprite에 없는 PSD 전용 모드는 사용자에게 손실 내용을 알리고 승인받은 경우에만 Normal로 대체합니다.
+            unsupported_layers = find_unsupported_aseprite_blend_mode_layers(
+                self.document.layers,
+                selected_layer_ids,
+            )
+            if unsupported_layers:
+                details = "\n".join(
+                    f"- {layer.display_name}: {blend_mode_display_name(layer.blend_mode)}"
+                    for layer in unsupported_layers
+                )
+                should_continue = messagebox.askyesno(
+                    "Aseprite 블렌드 모드 경고",
+                    "Aseprite가 아래 PSD 블렌드 모드를 지원하지 않습니다.\n"
+                    "계속하면 해당 모드는 표준(Normal)으로 저장됩니다.\n\n"
+                    f"{details}\n\n계속하시겠습니까?",
+                )
+                if not should_continue:
+                    return
+                job = replace(job, allow_unsupported_blend_mode_fallback=True)
         if should_warn_psd_rasterization(self.document.format if self.document is not None else None, job.export_format):
             # PSD 원본을 PSD로 다시 저장할 때는 모든 레이어가 픽셀 레이어로 변환됨을 명확히 알립니다.
             messagebox.showwarning(
@@ -1217,6 +1340,7 @@ class PsdDecomposerApp:
         self.settings.overwrite_existing = self.overwrite_existing_var.get()
         self.settings.export_format = self.format_var.get()
         self.settings.output_mode = self.output_mode_var.get()
+        self.settings.png_blend_mode_policy = self.png_blend_mode_var.get()
         self.settings.rescale = self.rescale_var.get()
         self.settings.preserve_canvas = self.layer_bounds_var.get() == "preserve"
         self.settings.save()

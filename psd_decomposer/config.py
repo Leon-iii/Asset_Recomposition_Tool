@@ -22,6 +22,7 @@ class AppSettings:
     overwrite_existing    : bool = False
     export_format         : str = "PNG"
     output_mode           : str = "decompose"
+    png_blend_mode_policy : str = "preserve_result"
     rescale               : int = 100
     preserve_canvas       : bool = True
 
@@ -44,6 +45,8 @@ class AppSettings:
             settings.export_format = "PNG"
         if settings.output_mode not in {"decompose", "reconstruct"}:
             settings.output_mode = "decompose"
+        if settings.png_blend_mode_policy not in {"standard", "preserve_result"}:
+            settings.png_blend_mode_policy = "preserve_result"
         if settings.rescale not in {100, 200, 400, 800}:
             settings.rescale = 100
         return settings

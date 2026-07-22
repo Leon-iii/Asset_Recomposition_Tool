@@ -1,0 +1,10 @@
+$icon = (Resolve-Path .\assets\app.ico).Path
+
+uv run pyinstaller `
+    --noconfirm `
+    --clean `
+    --onefile `
+    --windowed `
+    --icon="$icon" `
+    --name psd-decomposer-test `
+    main.py

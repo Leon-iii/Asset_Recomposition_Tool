@@ -8,7 +8,8 @@ from PIL import Image
 from .aseprite_codec import encode_aseprite_file
 from .aseprite_codec.constants import CEL_COMPRESSED_IMAGE, COLOR_DEPTH_RGBA
 from .aseprite_codec.model import AseFrame, AseHeader, AsepriteFile, CelChunk, LayerChunk
-from .document_backend import DocumentBackend
+from .blend_modes import blend_mode_display_name, blend_mode_to_aseprite
+from .document_backend import DocumentBackend, DocumentBackendError
 from .models import LayerInfo
 
 
@@ -20,6 +21,7 @@ def write_layers_to_aseprite(
     preserve_canvas: bool,
     rescale: int = 100,
     layer_names: dict[str, str] | None = None,
+    allow_unsupported_blend_mode_fallback: bool = False,
 ) -> Path:
     """문서 백엔드가 렌더링한 정적 레이어 이미지를 1프레임 Aseprite 파일로 저장합니다."""
 
@@ -35,6 +37,17 @@ def write_layers_to_aseprite(
         if layer.id not in selected:
             continue
         layer = _renamed_layer(layer, layer_names)
+
+        # Aseprite가 표현하지 못하는 PSD 전용 모드는 명시적 사용자 승인 없이는 조용히 손실시키지 않습니다.
+        ase_blend_mode = blend_mode_to_aseprite(layer.blend_mode)
+        if ase_blend_mode is None:
+            if not allow_unsupported_blend_mode_fallback:
+                raise DocumentBackendError(
+                    f"Aseprite가 지원하지 않는 블렌드 모드입니다: "
+                    f"{layer.display_name} ({blend_mode_display_name(layer.blend_mode)})"
+                )
+            ase_blend_mode = 0
+
         chunks.append(
             LayerChunk(
                 index=output_index,
@@ -42,7 +55,7 @@ def write_layers_to_aseprite(
                 visible=layer.visible,
                 layer_type=0,
                 child_level=0,
-                blend_mode=0,
+                blend_mode=ase_blend_mode,
                 opacity=255,
                 name=layer.name,
                 dirty=True,

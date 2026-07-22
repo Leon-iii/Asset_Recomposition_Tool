@@ -4,6 +4,9 @@ from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
 
+from PIL import Image
+
+from .blend_modes import LayerBlendMode, blend_mode_from_psd, normal_equivalent_layer
 from .document_backend import DocumentBackendError, DocumentFormat
 from .models import LayerInfo
 
@@ -83,6 +86,7 @@ class PsdDocument:
                     height=max(0, int(bottom) - int(top)),
                     left=int(left),
                     top=int(top),
+                    blend_mode=blend_mode_from_psd(getattr(node, "blend_mode", b"norm")),
                 )
 
         return walk(self._psd, ())
@@ -127,6 +131,57 @@ class PsdDocument:
         if image is None:
             raise PsdBackendError(f"레이어를 렌더링할 수 없습니다: {self.get_layer_info(layer_id).display_name}")
         return image
+
+    def render_layer_for_png(self, layer_id: str) -> Image.Image:
+        """PSD 특수 모드 레이어를 같은 하위 배경에서 사용할 Normal 등가 PNG 이미지로 렌더링합니다."""
+
+        layer = self.get_layer_info(layer_id)
+        source = self.render_layer(layer_id).convert("RGBA")
+        if layer.blend_mode is LayerBlendMode.NORMAL:
+            return source
+
+        # psd-tools의 PSD 레이어 열거 순서는 아래에서 위이므로 현재 항목 앞의 표시 레이어가 하위 배경입니다.
+        target_index = next(index for index, item in enumerate(self.layers) if item.id == layer_id)
+        below_layer_ids = tuple(
+            item.id
+            for item in self.layers[:target_index]
+            if self._is_layer_effectively_visible(item.id)
+        )
+        backdrop = (
+            self.render_composite(below_layer_ids)
+            if below_layer_ids
+            else Image.new("RGBA", (self.width, self.height), (0, 0, 0, 0))
+        )
+        return normal_equivalent_layer(backdrop, source, (layer.left, layer.top), layer.blend_mode)
+
+    def _is_layer_effectively_visible(self, layer_id: str) -> bool:
+        """레이어 자체와 상위 PSD 그룹을 포함한 최종 표시 여부를 반환합니다."""
+
+        node = self.get_layer_node(layer_id)
+        is_visible = getattr(node, "is_visible", None)
+        return bool(is_visible()) if callable(is_visible) else self.get_layer_info(layer_id).visible
+
+    def render_composite(self, selected_layer_ids: tuple[str, ...]):
+        """선택된 PSD 레이어만 원본 블렌드 모드와 스택 순서대로 합성합니다."""
+
+        # 선택 레이어의 상위 그룹도 필터에 포함해 psd-tools가 중첩 레이어까지 순회할 수 있게 합니다.
+        included_node_ids: set[int] = set()
+        for layer_id in selected_layer_ids:
+            node = self.get_layer_node(layer_id)
+            while node is not None and node is not self._psd:
+                included_node_ids.add(id(node))
+                node = getattr(node, "parent", None)
+
+        # 내장 미리보기를 우회하고 선택 필터를 강제해 현재 선택 상태를 정확히 렌더링합니다.
+        image = self._psd.composite(
+            ignore_preview=True,
+            color=0.0,
+            alpha=0.0,
+            layer_filter=lambda node: id(node) in included_node_ids,
+        )
+        if image is None:
+            raise PsdBackendError("선택된 PSD 레이어를 합성할 수 없습니다.")
+        return image.convert("RGBA")
 
     def render_preview(self):
         """드롭 존에 표시할 PSD 전체 미리보기 이미지를 렌더링합니다."""

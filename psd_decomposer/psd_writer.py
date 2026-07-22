@@ -5,6 +5,7 @@ from pathlib import Path
 
 from PIL import Image
 
+from .blend_modes import blend_mode_to_psd
 from .document_backend import DocumentBackend, DocumentBackendError
 from .models import LayerInfo
 
@@ -45,6 +46,11 @@ def write_layers_to_psd(
         pixel_layer = psd.create_pixel_layer(image, name="Layer", top=top, left=left)
         # name setter를 거치면 MacRoman 대체값과 PSD Unicode 레이어명 태그(luni)가 함께 기록됩니다.
         pixel_layer.name = layer.name
+        # 공통 모드가 PSD에 존재할 때 원본 레이어의 블렌드 모드를 새 픽셀 레이어에 보존합니다.
+        psd_blend_mode = blend_mode_to_psd(layer.blend_mode)
+        if psd_blend_mode is None:
+            raise DocumentBackendError(f"PSD가 지원하지 않는 블렌드 모드입니다: {layer.blend_mode.value}")
+        pixel_layer.blend_mode = psd_blend_mode
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     psd.save(output_path)

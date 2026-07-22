@@ -7,8 +7,10 @@ from uuid import uuid4
 
 from PIL import Image
 from psd_tools import PSDImage
+from psd_tools.constants import BlendMode as PsdBlendMode
 
 from psd_decomposer.aseprite_codec import decode_aseprite_file
+from psd_decomposer.blend_modes import LayerBlendMode, composite_layer, normal_equivalent_layer
 from psd_decomposer.document_backend import DocumentBackendError, DocumentFormat
 from psd_decomposer.exporter import Exporter
 from psd_decomposer.models import ExportJob, LayerInfo
@@ -45,6 +47,46 @@ class FakeDocument:
     def render_layer(self, layer_id: str) -> Image.Image:
         return self._images_by_id[layer_id]
 
+    def render_layer_for_png(self, layer_id: str) -> Image.Image:
+        """PSD 순서의 하위 레이어를 합성해 테스트용 Normal 등가 PNG 레이어를 반환합니다."""
+
+        layer_index = next(index for index, layer in enumerate(self.layers) if layer.id == layer_id)
+        layer = self.layers[layer_index]
+        source = self.render_layer(layer_id)
+
+        # 실제 백엔드와 같이 아래에서 위 순서로 현재 레이어 앞의 표시 레이어를 합성합니다.
+        backdrop = Image.new("RGBA", (self.width, self.height), (0, 0, 0, 0))
+        for below_layer in self.layers[:layer_index]:
+            if below_layer.visible:
+                backdrop = composite_layer(
+                    backdrop,
+                    self.render_layer(below_layer.id),
+                    (below_layer.left, below_layer.top),
+                    below_layer.blend_mode,
+                )
+        return normal_equivalent_layer(
+            backdrop,
+            source,
+            (layer.left, layer.top),
+            layer.blend_mode,
+        )
+
+    def render_composite(self, selected_layer_ids: tuple[str, ...]) -> Image.Image:
+        """테스트 문서도 실제 백엔드와 같은 공통 블렌드 합성 계약을 제공합니다."""
+
+        # 문서 레이어 순서와 각 레이어의 위치 및 블렌드 모드를 그대로 반영합니다.
+        selected = set(selected_layer_ids)
+        canvas = Image.new("RGBA", (self.width, self.height), (0, 0, 0, 0))
+        for layer in self.layers:
+            if layer.id in selected:
+                canvas = composite_layer(
+                    canvas,
+                    self.render_layer(layer.id),
+                    (layer.left, layer.top),
+                    layer.blend_mode,
+                )
+        return canvas
+
 
 class ExporterImageTests(unittest.TestCase):
     def test_prepare_png_image_preserves_canvas_and_position(self) -> None:
@@ -62,6 +104,108 @@ class ExporterImageTests(unittest.TestCase):
         output = Exporter._prepare_png_image(FakeDocument(layer, layer_image), "0", preserve_canvas=False)
 
         self.assertEqual(output.size, (2, 2))
+
+    def test_prepare_png_image_bakes_special_mode_against_lower_layers(self) -> None:
+        """개별 PNG의 특수 모드 색을 하위 배경 위에서 보이는 Normal 등가 색으로 변환합니다."""
+
+        bottom = LayerInfo(id="0", name="Bottom", path=(), visible=True, width=1, height=1)
+        top = LayerInfo(
+            id="1",
+            name="Multiply",
+            path=(),
+            visible=True,
+            width=1,
+            height=1,
+            blend_mode=LayerBlendMode.MULTIPLY,
+        )
+        document = FakeDocument(
+            bottom,
+            Image.new("RGBA", (1, 1), (128, 128, 128, 255)),
+            (top, Image.new("RGBA", (1, 1), (128, 255, 255, 255))),
+        )
+
+        output = Exporter._prepare_png_image(document, "1", preserve_canvas=False)
+
+        self.assertEqual(output.getpixel((0, 0)), (64, 128, 128, 255))
+
+    def test_prepare_png_image_can_treat_special_mode_as_standard_layer(self) -> None:
+        """표준 레이어 정책은 하위 배경과 블렌드 모드를 무시하고 원본 레스터 픽셀을 사용합니다."""
+
+        bottom = LayerInfo(id="0", name="Bottom", path=(), visible=True, width=1, height=1)
+        top = LayerInfo(
+            id="1",
+            name="Multiply",
+            path=(),
+            visible=True,
+            width=1,
+            height=1,
+            blend_mode=LayerBlendMode.MULTIPLY,
+        )
+        document = FakeDocument(
+            bottom,
+            Image.new("RGBA", (1, 1), (128, 128, 128, 255)),
+            (top, Image.new("RGBA", (1, 1), (128, 255, 255, 255))),
+        )
+
+        output = Exporter._prepare_png_image(
+            document,
+            "1",
+            preserve_canvas=False,
+            preserve_blend_result=False,
+        )
+
+        self.assertEqual(output.getpixel((0, 0)), (128, 255, 255, 255))
+
+    def test_export_png_applies_standard_layer_policy_from_job(self) -> None:
+        """ExportJob의 표준 레이어 정책이 실제 PNG 분해 출력까지 전달됩니다."""
+
+        output_dir = WORKSPACE_DIR / f"test-png-standard-blend-output-{uuid4().hex}"
+        bottom = LayerInfo(id="0", name="Bottom", path=(), visible=True, width=1, height=1)
+        top = LayerInfo(
+            id="1",
+            name="Multiply",
+            path=(),
+            visible=True,
+            width=1,
+            height=1,
+            blend_mode=LayerBlendMode.MULTIPLY,
+        )
+        document = FakeDocument(
+            bottom,
+            Image.new("RGBA", (1, 1), (128, 128, 128, 255)),
+            (top, Image.new("RGBA", (1, 1), (128, 255, 255, 255))),
+        )
+        job = ExportJob(
+            source_path=Path("source.psd"),
+            output_directory=output_dir,
+            wrap_with_folder=False,
+            include_original_name=False,
+            include_layer_name=True,
+            include_date=False,
+            overwrite_existing=False,
+            export_format="PNG",
+            rescale=100,
+            preserve_canvas=False,
+            selected_layer_ids=("1",),
+            png_blend_mode_policy="standard",
+        )
+        saved_images: list[Image.Image] = []
+
+        def capture_save(image: Image.Image, _path: Path) -> None:
+            """파일 쓰기 대신 테스트에서 최종 PNG 픽셀을 보관합니다."""
+
+            saved_images.append(image.copy())
+
+        try:
+            with (
+                patch("psd_decomposer.exporter.load_document", return_value=document),
+                patch.object(Image.Image, "save", autospec=True, side_effect=capture_save),
+            ):
+                Exporter().export(job)
+        finally:
+            _remove_output_dir(output_dir)
+
+        self.assertEqual(saved_images[0].getpixel((0, 0)), (128, 255, 255, 255))
 
     def test_export_png_handles_aseprite_layer_with_preserved_canvas(self) -> None:
         job = ExportJob(
@@ -335,6 +479,43 @@ class ExporterImageTests(unittest.TestCase):
         finally:
             _remove_output_dir(output_dir)
 
+    def test_export_psd_preserves_layer_blend_mode(self) -> None:
+        """레스터화된 PSD 픽셀 레이어에도 원본 블렌드 모드를 기록합니다."""
+
+        output_dir = WORKSPACE_DIR / f"test-psd-blend-output-{uuid4().hex}"
+        layer = LayerInfo(
+            id="0",
+            name="Multiply",
+            path=(),
+            visible=True,
+            width=1,
+            height=1,
+            blend_mode=LayerBlendMode.MULTIPLY,
+        )
+        document = FakeDocument(layer, Image.new("RGBA", (1, 1), (128, 128, 128, 255)))
+        job = ExportJob(
+            source_path=Path("source.aseprite"),
+            output_directory=output_dir,
+            wrap_with_folder=False,
+            include_original_name=False,
+            include_layer_name=True,
+            include_date=False,
+            overwrite_existing=False,
+            export_format="PSD",
+            rescale=100,
+            preserve_canvas=True,
+            selected_layer_ids=("0",),
+        )
+
+        try:
+            with patch("psd_decomposer.exporter.load_document", return_value=document):
+                outputs = Exporter().export(job)
+            psd = PSDImage.open(outputs[0])
+        finally:
+            _remove_output_dir(output_dir)
+
+        self.assertEqual(psd[0].blend_mode, PsdBlendMode.MULTIPLY)
+
     def test_export_psd_preserves_korean_layer_name(self) -> None:
         """한글 레이어명을 Unicode 태그로 기록해 PSD 저장 오류 없이 보존합니다."""
 
@@ -490,6 +671,118 @@ class ExporterImageTests(unittest.TestCase):
 
         self.assertEqual(outputs, [output_dir / "Hero.aseprite"])
         self.assertEqual([layer.name for layer in decoded.layers], ["Hero"])
+
+    def test_export_ase_preserves_supported_layer_blend_mode(self) -> None:
+        """PSD 공통 더하기 모드를 Aseprite Addition 값으로 보존합니다."""
+
+        output_dir = WORKSPACE_DIR / f"test-ase-blend-output-{uuid4().hex}"
+        layer = LayerInfo(
+            id="0",
+            name="Addition",
+            path=(),
+            visible=True,
+            width=1,
+            height=1,
+            blend_mode=LayerBlendMode.ADDITION,
+        )
+        document = FakeDocument(layer, Image.new("RGBA", (1, 1), (64, 64, 64, 255)))
+        job = ExportJob(
+            source_path=Path("source.psd"),
+            output_directory=output_dir,
+            wrap_with_folder=False,
+            include_original_name=False,
+            include_layer_name=True,
+            include_date=False,
+            overwrite_existing=False,
+            export_format="ASE",
+            rescale=100,
+            preserve_canvas=True,
+            selected_layer_ids=("0",),
+        )
+
+        try:
+            with patch("psd_decomposer.exporter.load_document", return_value=document):
+                outputs = Exporter().export(job)
+            decoded = decode_aseprite_file(outputs[0])
+        finally:
+            _remove_output_dir(output_dir)
+
+        self.assertEqual(decoded.layers[0].blend_mode, 16)
+
+    def test_export_ase_requires_explicit_fallback_for_unsupported_mode(self) -> None:
+        """PSD 전용 모드는 사용자 승인 플래그가 없으면 ASE 변환을 중단합니다."""
+
+        output_dir = WORKSPACE_DIR / f"test-ase-unsupported-blend-output-{uuid4().hex}"
+        layer = LayerInfo(
+            id="0",
+            name="Vivid Light",
+            path=(),
+            visible=True,
+            width=1,
+            height=1,
+            blend_mode=LayerBlendMode.VIVID_LIGHT,
+        )
+        document = FakeDocument(layer, Image.new("RGBA", (1, 1), (64, 64, 64, 255)))
+        job = ExportJob(
+            source_path=Path("source.psd"),
+            output_directory=output_dir,
+            wrap_with_folder=False,
+            include_original_name=False,
+            include_layer_name=True,
+            include_date=False,
+            overwrite_existing=False,
+            export_format="ASE",
+            rescale=100,
+            preserve_canvas=True,
+            selected_layer_ids=("0",),
+        )
+
+        try:
+            with (
+                patch("psd_decomposer.exporter.load_document", return_value=document),
+                self.assertRaises(DocumentBackendError),
+            ):
+                Exporter().export(job)
+        finally:
+            _remove_output_dir(output_dir)
+
+    def test_export_ase_uses_normal_after_explicit_unsupported_mode_fallback(self) -> None:
+        """승인된 PSD 전용 모드는 ASE 파일에서 Normal 값으로 대체합니다."""
+
+        output_dir = WORKSPACE_DIR / f"test-ase-fallback-blend-output-{uuid4().hex}"
+        layer = LayerInfo(
+            id="0",
+            name="Vivid Light",
+            path=(),
+            visible=True,
+            width=1,
+            height=1,
+            blend_mode=LayerBlendMode.VIVID_LIGHT,
+        )
+        document = FakeDocument(layer, Image.new("RGBA", (1, 1), (64, 64, 64, 255)))
+        job = ExportJob(
+            source_path=Path("source.psd"),
+            output_directory=output_dir,
+            wrap_with_folder=False,
+            include_original_name=False,
+            include_layer_name=True,
+            include_date=False,
+            overwrite_existing=False,
+            export_format="ASE",
+            rescale=100,
+            preserve_canvas=True,
+            selected_layer_ids=("0",),
+            allow_unsupported_blend_mode_fallback=True,
+        )
+
+        try:
+            with patch("psd_decomposer.exporter.load_document", return_value=document):
+                outputs = Exporter().export(job)
+            decoded = decode_aseprite_file(outputs[0])
+        finally:
+            _remove_output_dir(output_dir)
+
+        self.assertEqual(decoded.layers[0].blend_mode, 0)
 
     def test_reconstruct_ase_converts_psd_selected_layers(self) -> None:
         output_dir = WORKSPACE_DIR / f"test-psd-reconstruct-ase-output-{uuid4().hex}"

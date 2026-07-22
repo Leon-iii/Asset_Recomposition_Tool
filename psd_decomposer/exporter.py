@@ -34,6 +34,8 @@ class Exporter:
             raise PsdBackendError("내보낼 레이어를 하나 이상 선택하세요.")
         if job.output_mode not in {"decompose", "reconstruct"}:
             raise PsdBackendError(f"지원하지 않는 작동 모드입니다: {job.output_mode}")
+        if job.png_blend_mode_policy not in {"standard", "preserve_result"}:
+            raise PsdBackendError(f"지원하지 않는 PNG 블렌드 모드 정책입니다: {job.png_blend_mode_policy}")
 
         document = load_document(job.source_path)
         # 재구성 모드는 단일 파일 출력이므로 하위 폴더 묶기를 항상 무시합니다.
@@ -70,7 +72,12 @@ class Exporter:
         for layer_id in job.selected_layer_ids:
             layer = self._job_layer(document, job, layer_id)
             self.progress(f"PNG 렌더링 중: {layer.display_name}")
-            image = self._prepare_png_image(document, layer_id, job.preserve_canvas)
+            image = self._prepare_png_image(
+                document,
+                layer_id,
+                job.preserve_canvas,
+                preserve_blend_result=job.png_blend_mode_policy == "preserve_result",
+            )
             if scale != 1:
                 # 확대 옵션은 캔버스 보존 또는 crop 이후의 최종 이미지 크기에 적용합니다.
                 width = max(1, round(image.width * scale))
@@ -93,7 +100,7 @@ class Exporter:
     def _export_reconstructed_png(self, document: DocumentBackend, job: ExportJob, output_directory: Path) -> list[Path]:
         """선택한 레이어를 하나의 PNG 이미지로 합성해 저장합니다."""
 
-        # 선택 레이어를 원본 캔버스 기준으로 합성해 단일 이미지로 만듭니다.
+        # 진행 메시지를 먼저 알린 뒤 포맷 백엔드의 블렌드 모드 인식 합성 경로를 사용합니다.
         image = self._compose_selected_layers(document, job.selected_layer_ids)
 
         scale = job.rescale / 100
@@ -115,24 +122,30 @@ class Exporter:
         return [output_path]
 
     def _compose_selected_layers(self, document: DocumentBackend, selected_layer_ids: tuple[str, ...]) -> Image.Image:
-        """문서 순서를 기준으로 선택한 레이어들을 원본 캔버스 위에 합성합니다."""
+        """문서 백엔드에서 선택 레이어의 순서와 블렌드 모드를 반영해 합성합니다."""
 
         selected = set(selected_layer_ids)
-        canvas = Image.new("RGBA", (document.width, document.height), (0, 0, 0, 0))
         for layer in document.layers:
-            if layer.id not in selected:
-                continue
-            self.progress(f"레이어 합성 중: {layer.display_name}")
-            layer_image = self._prepare_png_image(document, layer.id, preserve_canvas=True)
-            canvas.alpha_composite(layer_image.convert("RGBA"), dest=(0, 0))
-        return canvas
+            if layer.id in selected:
+                self.progress(f"레이어 합성 중: {layer.display_name}")
+        return document.render_composite(selected_layer_ids)
 
     @staticmethod
-    def _prepare_png_image(document: DocumentBackend, layer_id: str, preserve_canvas: bool) -> Image.Image:
+    def _prepare_png_image(
+        document: DocumentBackend,
+        layer_id: str,
+        preserve_canvas: bool,
+        preserve_blend_result: bool = True,
+    ) -> Image.Image:
         """레이어를 원본 캔버스에 얹거나, 레이어 자체 크기로 crop한 이미지를 준비합니다."""
 
         layer = document.get_layer_info(layer_id)
-        image = document.render_layer(layer_id).convert("RGBA")
+        # 정책에 따라 원본 레스터 픽셀 또는 하위 배경 결과를 구운 Normal 등가 이미지를 사용합니다.
+        image = (
+            document.render_layer_for_png(layer_id)
+            if preserve_blend_result
+            else document.render_layer(layer_id)
+        ).convert("RGBA")
         if not preserve_canvas:
             return image
         if image.size == (document.width, document.height):
@@ -239,6 +252,7 @@ class Exporter:
                 preserve_canvas=job.preserve_canvas,
                 rescale=job.rescale,
                 layer_names=job.layer_names,
+                allow_unsupported_blend_mode_fallback=job.allow_unsupported_blend_mode_fallback,
             )
             outputs.append(output_path)
 
@@ -264,6 +278,7 @@ class Exporter:
             preserve_canvas=True,
             rescale=job.rescale,
             layer_names=job.layer_names,
+            allow_unsupported_blend_mode_fallback=job.allow_unsupported_blend_mode_fallback,
         )
         return [output_path]
 

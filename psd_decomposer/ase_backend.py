@@ -8,6 +8,7 @@ from .aseprite_codec import decode_aseprite_file, encode_aseprite_file, rename_l
 from .aseprite_codec.constants import CEL_LINKED, COLOR_DEPTH_RGBA
 from .aseprite_codec.errors import AseEditError, AseFormatError
 from .aseprite_codec.model import CelChunk
+from .blend_modes import LayerBlendMode, blend_mode_from_aseprite, composite_layer, normal_equivalent_layer
 from .document_backend import ASEPRITE_EXTENSIONS, DocumentBackendError, DocumentFormat
 from .models import LayerInfo
 
@@ -111,6 +112,7 @@ class AsepriteDocument:
                     height=height,
                     left=left,
                     top=top,
+                    blend_mode=blend_mode_from_aseprite(layer.blend_mode),
                 )
             )
             parents_by_level[layer.child_level] = layer.name
@@ -132,22 +134,44 @@ class AsepriteDocument:
             return Image.new("RGBA", (1, 1), (0, 0, 0, 0))
         return self._cel_to_image(cel, self._layer_opacity(layer_index))
 
-    def render_preview(self) -> Image.Image:
-        canvas = Image.new("RGBA", (self.width, self.height), (0, 0, 0, 0))
-        if not self.ase_file.frames:
-            return canvas
+    def render_layer_for_png(self, layer_id: str) -> Image.Image:
+        """Aseprite 특수 모드 레이어를 같은 하위 배경에서 사용할 Normal 등가 PNG 이미지로 렌더링합니다."""
 
-        frame = self.ase_file.frames[0]
-        for cel in sorted(frame.cels, key=lambda item: (item.layer_index, item.z_index)):
-            layer = self._ase_layers_by_index.get(cel.layer_index)
-            if layer is None or not layer.visible:
-                continue
-            renderable_cel = self._resolve_linked_cel(cel, frame_index=0)
-            if renderable_cel is None:
-                continue
-            image = self._cel_to_image(renderable_cel, layer.opacity)
-            canvas.alpha_composite(image, dest=(renderable_cel.x, renderable_cel.y))
-        return canvas
+        layer_info = self.get_layer_info(layer_id)
+        source = self.render_layer(layer_id).convert("RGBA")
+        if layer_info.blend_mode is LayerBlendMode.NORMAL:
+            return source
+
+        # Aseprite 레이어 인덱스는 아래에서 위 순서이므로 현재 인덱스보다 작은 표시 레이어를 합성합니다.
+        target_index = int(layer_id)
+        below_layer_ids = tuple(
+            layer.id
+            for layer in self.layers
+            if int(layer.id) < target_index and layer.visible
+        )
+        backdrop = (
+            self.render_composite(below_layer_ids)
+            if below_layer_ids
+            else Image.new("RGBA", (self.width, self.height), (0, 0, 0, 0))
+        )
+        return normal_equivalent_layer(
+            backdrop,
+            source,
+            (layer_info.left, layer_info.top),
+            layer_info.blend_mode,
+        )
+
+    def render_preview(self) -> Image.Image:
+        """첫 프레임의 표시 레이어를 원본 블렌드 모드로 합성합니다."""
+
+        # 일반 미리보기는 원본에서 표시 중인 레이어만 선택 합성 경로에 전달합니다.
+        visible_layer_ids = tuple(str(layer.index) for layer in self.ase_file.layers if layer.visible)
+        return self._render_frame_composite(visible_layer_ids, (self.width, self.height), 1.0)
+
+    def render_composite(self, selected_layer_ids: tuple[str, ...]) -> Image.Image:
+        """선택된 Aseprite 레이어를 첫 프레임 기준 블렌드 모드와 순서대로 합성합니다."""
+
+        return self._render_frame_composite(selected_layer_ids, (self.width, self.height), 1.0)
 
     def render_preview_thumbnail(self, max_size: tuple[int, int]) -> Image.Image:
         """드롭 존 표시용 Aseprite 미리보기를 처음부터 축소 크기로 합성합니다."""
@@ -157,26 +181,9 @@ class AsepriteDocument:
         if scale >= 1:
             return self.render_preview()
 
-        canvas = Image.new("RGBA", target_size, (0, 0, 0, 0))
-        if not self.ase_file.frames:
-            return canvas
-
-        # 첫 프레임의 표시 가능한 cel만 축소한 뒤 위치도 같은 배율로 줄여 합성합니다.
-        frame = self.ase_file.frames[0]
-        for cel in sorted(frame.cels, key=lambda item: (item.layer_index, item.z_index)):
-            layer = self._ase_layers_by_index.get(cel.layer_index)
-            if layer is None or not layer.visible:
-                continue
-            renderable_cel = self._resolve_linked_cel(cel, frame_index=0)
-            if renderable_cel is None:
-                continue
-            image = self._cel_to_image(renderable_cel, layer.opacity)
-            image = self._resize_for_preview_thumbnail(image, scale)
-            canvas.alpha_composite(
-                image,
-                dest=(int(renderable_cel.x * scale), int(renderable_cel.y * scale)),
-            )
-        return canvas
+        # 첫 프레임의 표시 레이어를 처음부터 축소한 캔버스에서 블렌드 합성합니다.
+        visible_layer_ids = tuple(str(layer.index) for layer in self.ase_file.layers if layer.visible)
+        return self._render_frame_composite(visible_layer_ids, target_size, scale)
 
     def render_layer_thumbnail(self, layer_id: str, max_size: tuple[int, int] = (48, 48)) -> Image.Image:
         image = self.render_layer(layer_id).convert("RGBA")
@@ -203,6 +210,41 @@ class AsepriteDocument:
         width = max(1, round(image.width * scale))
         height = max(1, round(image.height * scale))
         return image.resize((width, height), Image.Resampling.LANCZOS)
+
+    def _render_frame_composite(
+        self,
+        selected_layer_ids: tuple[str, ...],
+        canvas_size: tuple[int, int],
+        scale: float,
+    ) -> Image.Image:
+        """첫 프레임의 선택 레이어를 요청 캔버스 크기와 배율로 블렌드 합성합니다."""
+
+        canvas = Image.new("RGBA", canvas_size, (0, 0, 0, 0))
+        if not self.ase_file.frames:
+            return canvas
+
+        # GUI 선택 여부가 원본 visibility와 다를 수 있으므로 전달받은 id 집합만 합성 조건으로 사용합니다.
+        selected_indices = {int(layer_id) for layer_id in selected_layer_ids}
+        frame = self.ase_file.frames[0]
+        for cel in sorted(frame.cels, key=lambda item: (item.layer_index, item.z_index)):
+            if cel.layer_index not in selected_indices:
+                continue
+            layer = self._ase_layers_by_index.get(cel.layer_index)
+            if layer is None:
+                continue
+            renderable_cel = self._resolve_linked_cel(cel, frame_index=0)
+            if renderable_cel is None:
+                continue
+            image = self._cel_to_image(renderable_cel, layer.opacity)
+            if scale != 1:
+                image = self._resize_for_preview_thumbnail(image, scale)
+            canvas = composite_layer(
+                canvas,
+                image,
+                (round(renderable_cel.x * scale), round(renderable_cel.y * scale)),
+                blend_mode_from_aseprite(layer.blend_mode),
+            )
+        return canvas
 
     def _find_renderable_cel(self, layer_index: int, frame_index: int) -> CelChunk | None:
         if not self.ase_file.frames:

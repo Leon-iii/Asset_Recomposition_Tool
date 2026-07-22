@@ -3,6 +3,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
+from .blend_modes import LayerBlendMode
+
 
 @dataclass(frozen=True)
 class LayerInfo:
@@ -16,6 +18,7 @@ class LayerInfo:
     height: int
     left: int = 0
     top: int = 0
+    blend_mode: LayerBlendMode = LayerBlendMode.NORMAL
 
     @property
     def display_name(self) -> str:
@@ -42,3 +45,5 @@ class ExportJob:
     output_mode: str = "decompose"
     include_layer_count: bool = False
     layer_names: dict[str, str] | None = None
+    allow_unsupported_blend_mode_fallback: bool = False
+    png_blend_mode_policy: str = "preserve_result"
